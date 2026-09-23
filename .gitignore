@@ -1,0 +1,11 @@
+node_modules/
+inbox/
+*.part
+.DS_Store
+Thumbs.db
+
+# .NET build output (TaildropApp) - includes the published exe; build it locally with `dotnet publish`
+[Bb]in/
+[Oo]bj/
+*.user
+.vs/
