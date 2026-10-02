@@ -9,7 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace TaildropApp;
+namespace Taildrop.Core;
 
 sealed class UploadException : Exception
 {
@@ -23,7 +23,7 @@ sealed class UploadException : Exception
     }
 }
 
-sealed class TaildropServer : IAsyncDisposable
+public sealed class TaildropServer : IAsyncDisposable
 {
     const long MaxFileSize = 5L * 1024 * 1024 * 1024; // 5 GB
     static readonly Regex InvalidChars = new(@"[<>:""/\\|?*\u0000-\u001F]", RegexOptions.Compiled);
@@ -32,7 +32,6 @@ sealed class TaildropServer : IAsyncDisposable
 
     readonly string _inboxDir;
     readonly HashSet<string> _reservedNames = new(StringComparer.Ordinal);
-    readonly HashSet<string> _activeParts = new(StringComparer.Ordinal);
     readonly SemaphoreSlim _reservationLock = new(1, 1);
     WebApplication? _app;
 
@@ -157,13 +156,12 @@ sealed class TaildropServer : IAsyncDisposable
         }
         catch
         {
-            _reservedNames.Remove(name);
+            await ReleaseNameAsync(name);
             await JsonAsync(res, 400, new { error = "Invalid file name" });
             return;
         }
 
         var tempPath = Path.Combine(_inboxDir, $".taildrop-{Guid.NewGuid():N}.part");
-        _activeParts.Add(tempPath);
         long received = 0;
         try
         {
@@ -181,18 +179,16 @@ sealed class TaildropServer : IAsyncDisposable
                 await fileStream.FlushAsync(context.RequestAborted);
             }
             File.Move(tempPath, finalPath);
-            _activeParts.Remove(tempPath);
             await JsonAsync(res, 201, new { name, size = received });
         }
         catch
         {
             try { File.Delete(tempPath); } catch { /* best effort */ }
-            _activeParts.Remove(tempPath);
             throw;
         }
         finally
         {
-            _reservedNames.Remove(name);
+            await ReleaseNameAsync(name);
         }
     }
 
@@ -201,15 +197,21 @@ sealed class TaildropServer : IAsyncDisposable
         var req = context.Request;
         var res = context.Response;
         var requested = req.Path == "/" ? "index.html" : req.Path.ToString().TrimStart('/');
-        if (!StaticAssets.TryGet(requested, out var bytes, out var contentType))
+        if (!StaticAssets.TryGet(requested, out var bytes, out var contentType, out var etag))
         {
             await JsonAsync(res, 404, new { error = "Not found" });
             return;
         }
-        res.StatusCode = 200;
         res.ContentType = contentType;
-        res.ContentLength = bytes.Length;
         res.Headers.CacheControl = "no-cache";
+        res.Headers.ETag = etag;
+        if (req.Headers.IfNoneMatch.ToString().Contains(etag, StringComparison.Ordinal))
+        {
+            res.StatusCode = 304;
+            return;
+        }
+        res.StatusCode = 200;
+        res.ContentLength = bytes.Length;
         if (req.Method == "HEAD") return;
         await res.Body.WriteAsync(bytes, context.RequestAborted);
     }
@@ -246,6 +248,13 @@ sealed class TaildropServer : IAsyncDisposable
         {
             _reservationLock.Release();
         }
+    }
+
+    async Task ReleaseNameAsync(string name)
+    {
+        await _reservationLock.WaitAsync();
+        try { _reservedNames.Remove(name); }
+        finally { _reservationLock.Release(); }
     }
 
     Task<string> AvailableNameAsync(string name)

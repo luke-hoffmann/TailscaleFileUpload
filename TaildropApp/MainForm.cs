@@ -3,8 +3,10 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
+using Taildrop.Core;
 
 namespace TaildropApp;
+
 
 sealed class MainForm : Form
 {

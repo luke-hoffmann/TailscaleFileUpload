@@ -1,9 +1,9 @@
 using System.Drawing;
 using QRCoder;
 
-namespace TaildropApp;
+namespace Taildrop.Core;
 
-static class QrCode
+public static class QrCode
 {
     static readonly Color Dark = Color.FromArgb(0x15, 0x17, 0x14);
     static readonly Color Light = Color.White;

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Taildrop.Core</RootNamespace>
+    <AssemblyName>Taildrop.Core</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>$(NoWarn);CS9057</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Lets a plain class library use Kestrel/ASP.NET Core hosting APIs -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260627" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Phone-facing web page. Flat folder; resources are named "Assets.<file>" so lookups stay predictable. -->
+    <EmbeddedResource Include="Assets\*.*" LogicalName="Assets.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Taildrop.Core.Tests" />
+  </ItemGroup>
+
+</Project>
