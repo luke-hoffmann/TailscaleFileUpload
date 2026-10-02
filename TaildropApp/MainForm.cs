@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -7,171 +8,349 @@ using Taildrop.Core;
 
 namespace TaildropApp;
 
-
-sealed class MainForm : Form
+sealed partial class MainForm : Form
 {
     const int Port = 8787;
+    const int NewFileTintMs = 3500;
+    const int StatusClearMs = 20000;
 
-    static readonly Color Background = Color.FromArgb(246, 247, 244);
-    static readonly Color White = Color.White;
-    static readonly Color Ink = Color.FromArgb(25, 28, 24);
-    static readonly Color Muted = Color.FromArgb(102, 110, 100);
-    static readonly Color Green = Color.FromArgb(30, 106, 61);
-    static readonly Color GreenPale = Color.FromArgb(224, 244, 231);
-    static readonly Color Red = Color.FromArgb(168, 57, 47);
+    static readonly char[] InvalidNameChars = Path.GetInvalidFileNameChars();
+    static readonly HashSet<string> ReservedNames = new(
+        new[] { "CON", "PRN", "AUX", "NUL" }.Concat(Enumerable.Range(1, 9).SelectMany(i => new[] { $"COM{i}", $"LPT{i}" })),
+        StringComparer.OrdinalIgnoreCase);
+    static readonly HashSet<string> RiskyExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".pif", ".ps1", ".vbs", ".vbe", ".js", ".jse",
+        ".wsf", ".wsh", ".hta", ".lnk", ".reg", ".cpl", ".jar", ".msc"
+    };
 
-    readonly Panel _statusPanel;
-    readonly Panel _statusDot;
-    readonly Label _statusLabel;
-    readonly Label _promptLabel;
-    readonly Label _urlLabel;
-    readonly Button _qrButton;
-    readonly Button _copyButton;
-    readonly ListView _fileList;
-    readonly Label _emptyLabel;
-    readonly Button _saveSelectedButton;
-    readonly Button _saveAllButton;
-    readonly System.Windows.Forms.Timer _inboxTimer;
-    readonly System.Windows.Forms.Timer _copyTimer;
+    // Connect card
+    readonly StatusDot _statusDot = new();
+    readonly Label _statusLabel = NewLabel("Starting...", UiFonts.BodyStrong, Palette.Muted);
+    readonly Label _captionLabel = NewLabel("", UiFonts.Small, Palette.Muted);
+    readonly QrView _qrView = new() { Placeholder = "Starting..." };
+    readonly Label _messageLabel = NewLabel("Finding your Tailscale address...", UiFonts.Body, Palette.Muted);
+    // Doubles as "Try again" when the receiver could not start.
+    readonly RoundedButton _copyButton = new("Copy link", ButtonKind.Primary);
+
+    // Inbox pane
+    readonly InboxListView _fileList = new();
+    readonly EmptyState _emptyState = new("Your inbox is empty", "Files and scans sent from your phone will appear here.");
+    readonly RoundedButton _saveSelectedButton = new("Save selected", ButtonKind.Primary, 140);
+    readonly RoundedButton _saveAllButton = new("Save all", ButtonKind.Secondary, 100);
+    readonly RoundedButton _removeButton = new("Remove", ButtonKind.Plain, 100);
+    readonly Label _resultLabel = NewLabel("", UiFonts.Small, Palette.Muted);
+    readonly LinkLabel _revealLink = new();
+    readonly ContextMenuStrip _menu = new() { Font = UiFonts.Body, ShowImageMargin = false };
+    readonly ToolStripMenuItem _openItem = new("Open");
+    readonly ToolStripMenuItem _saveItem = new("Save...");
+    readonly ToolStripMenuItem _renameItem = new("Rename") { ShortcutKeyDisplayString = "F2" };
+    readonly ToolStripMenuItem _removeItem = new("Remove from inbox") { ShortcutKeyDisplayString = "Del" };
+    readonly ImageList _rowSizer = new() { ColorDepth = ColorDepth.Depth32Bit };
+
+    readonly System.Windows.Forms.Timer _inboxTimer = new() { Interval = 400 };
+    readonly System.Windows.Forms.Timer _copyTimer = new() { Interval = 1400 };
+    readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = StatusClearMs };
+
+    readonly Dictionary<string, long> _recent = new(StringComparer.OrdinalIgnoreCase); // file name -> tint expiry (TickCount64)
+    HashSet<string> _knownNames = new(StringComparer.OrdinalIgnoreCase);
 
     TaildropServer? _server;
     Process? _cleanupProcess;
+    Bitmap? _qrBitmap;
     string? _taildropUrl;
     string? _inboxPath;
-    bool _cleanupStarted;
+    string? _revealPath;
+    string? _pendingSelect;
+    int? _pendingIndex;
     string _lastSignature = "";
+    string _lastSaveFolder = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+    bool _cleanupStarted;
+    bool _starting;
+    bool _failed;
+    bool _saving;
+    bool _editing;
+    bool _rebuilding;
 
     public MainForm()
     {
+        SuspendLayout();
         Text = "Taildrop";
-        ClientSize = new Size(620, 710);
+        BackColor = Palette.Background;
+        ForeColor = Palette.Ink;
+        Font = UiFonts.Body;
+        DoubleBuffered = true;
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Background;
-        ForeColor = Ink;
-        Font = new Font("Segoe UI", 10);
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        Padding = new Padding(24, 16, 24, 20);
 
-        var title = MakeLabel("Taildrop", 22, FontStyle.Bold, Ink);
-        title.Location = new Point(28, 24);
-        Controls.Add(title);
+        _rowSizer.ImageSize = new Size(1, this.Px(40)); // gives list rows a roomy, easy-to-hit height
 
-        var subtitle = MakeLabel("Phone to this computer, privately over Tailscale", 9.5f, FontStyle.Regular, Muted);
-        subtitle.Location = new Point(31, 62);
-        Controls.Add(subtitle);
+        // WinForms docks in reverse z-order: the fill pane is added first, edge panels after it.
+        var inbox = BuildInboxPane();
+        var gap = new Panel { Dock = DockStyle.Left, Width = 20 };
+        var connect = BuildConnectCard();
+        var header = BuildHeader();
+        connect.TabIndex = 0;
+        inbox.TabIndex = 1;
+        Controls.Add(inbox);
+        Controls.Add(gap);
+        Controls.Add(connect);
+        Controls.Add(header);
 
-        _statusPanel = new Panel { Location = new Point(28, 102), Size = new Size(564, 188), BackColor = White };
-        Controls.Add(_statusPanel);
-
-        _statusDot = new Panel { Location = new Point(22, 24), Size = new Size(10, 10), BackColor = Muted };
-        _statusPanel.Controls.Add(_statusDot);
-        _statusLabel = MakeLabel("Starting...", 10, FontStyle.Bold, Muted);
-        _statusLabel.Location = new Point(42, 19);
-        _statusPanel.Controls.Add(_statusLabel);
-        _promptLabel = MakeLabel("Scan the QR code with your phone", 17, FontStyle.Bold, Ink);
-        _promptLabel.Location = new Point(22, 62);
-        _statusPanel.Controls.Add(_promptLabel);
-        _urlLabel = MakeLabel("Finding your Tailscale address...", 10, FontStyle.Regular, Muted);
-        _urlLabel.Location = new Point(24, 99);
-        _urlLabel.MaximumSize = new Size(515, 24);
-        _statusPanel.Controls.Add(_urlLabel);
-
-        _qrButton = MakeButton("Show QR code", 146, Green, White);
-        _qrButton.Location = new Point(22, 130);
-        _qrButton.Enabled = false;
-        _qrButton.Click += QrButton_Click;
-        _statusPanel.Controls.Add(_qrButton);
-
-        _copyButton = MakeButton("Copy link", 110, GreenPale, Green);
-        _copyButton.Location = new Point(178, 130);
-        _copyButton.Enabled = false;
-        _copyButton.Click += CopyButton_Click;
-        _statusPanel.Controls.Add(_copyButton);
-
-        var inboxCaption = MakeLabel("TEMPORARY INBOX", 8, FontStyle.Bold, Green);
-        inboxCaption.Location = new Point(31, 316);
-        Controls.Add(inboxCaption);
-        var inboxHint = MakeLabel("Select files, then drag them into File Explorer", 9, FontStyle.Regular, Muted);
-        inboxHint.Location = new Point(31, 338);
-        Controls.Add(inboxHint);
-
-        _fileList = new ListView
-        {
-            Location = new Point(28, 370),
-            Size = new Size(564, 248),
-            View = View.Details,
-            FullRowSelect = true,
-            MultiSelect = true,
-            HideSelection = false,
-            GridLines = false,
-            BorderStyle = BorderStyle.FixedSingle,
-            BackColor = White,
-            ForeColor = Ink,
-            Font = new Font("Segoe UI", 9.5f)
-        };
-        _fileList.Columns.Add("Name", 326);
-        _fileList.Columns.Add("Size", 92);
-        _fileList.Columns.Add("Received", 122);
-        _fileList.ItemDrag += FileList_ItemDrag;
-        Controls.Add(_fileList);
-
-        _emptyLabel = MakeLabel("Files sent from your phone will appear here.", 10, FontStyle.Regular, Muted);
-        _emptyLabel.Location = new Point(169, 472);
-        Controls.Add(_emptyLabel);
-        _emptyLabel.BringToFront();
-
-        _saveSelectedButton = MakeButton("Save selected", 136, Green, White);
-        _saveSelectedButton.Location = new Point(28, 634);
-        _saveSelectedButton.Enabled = false;
-        _saveSelectedButton.Click += (_, _) => SaveInboxItems(_fileList.SelectedItems.Cast<ListViewItem>());
-        Controls.Add(_saveSelectedButton);
-
-        _saveAllButton = MakeButton("Save all", 108, White, Ink);
-        _saveAllButton.Location = new Point(174, 634);
-        _saveAllButton.Enabled = false;
-        _saveAllButton.Click += (_, _) => SaveInboxItems(_fileList.Items.Cast<ListViewItem>());
-        Controls.Add(_saveAllButton);
-
-        _fileList.SelectedIndexChanged += (_, _) => _saveSelectedButton.Enabled = _fileList.SelectedItems.Count > 0;
-
-        var temporaryLabel = MakeLabel("Closing Taildrop permanently deletes anything left here.", 8.5f, FontStyle.Regular, Muted);
-        temporaryLabel.Location = new Point(31, 687);
-        Controls.Add(temporaryLabel);
-
-        _copyTimer = new System.Windows.Forms.Timer { Interval = 1400 };
         _copyTimer.Tick += (_, _) => { _copyButton.Text = "Copy link"; _copyTimer.Stop(); };
-
-        _inboxTimer = new System.Windows.Forms.Timer { Interval = 400 };
         _inboxTimer.Tick += (_, _) => RefreshTemporaryInbox();
+        _statusTimer.Tick += (_, _) => ShowStatus("", Palette.Muted);
+
+        // Everything above is authored at 96 dpi; the form scales it. Custom painting scales itself (UiKit.Px).
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
 
         Shown += MainForm_Shown;
         FormClosing += MainForm_FormClosing;
     }
 
-    static Label MakeLabel(string text, float size, FontStyle style, Color color) => new()
+    protected override void OnLoad(EventArgs e)
+    {
+        // Sized here, in real pixels: a 1080p screen at 150% only has ~720 logical px of height.
+        var area = Screen.FromPoint(MousePosition).WorkingArea;
+        MinimumSize = new Size(Math.Min(this.Px(800), area.Width), Math.Min(this.Px(560), area.Height));
+        var width = Math.Min(this.Px(980), area.Width - this.Px(32));
+        var height = Math.Min(this.Px(640), area.Height - this.Px(32));
+        Size = new Size(Math.Max(width, MinimumSize.Width), Math.Max(height, MinimumSize.Height));
+        CenterToScreen();
+        base.OnLoad(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _inboxTimer.Dispose();
+            _copyTimer.Dispose();
+            _statusTimer.Dispose();
+        }
+        base.Dispose(disposing); // disposes the child controls first, so nothing still points at the items below
+        if (disposing)
+        {
+            _menu.Dispose();
+            _rowSizer.Dispose();
+            _qrBitmap?.Dispose();
+            _qrBitmap = null;
+        }
+    }
+
+    static Label NewLabel(string text, Font font, Color color) => new()
     {
         Text = text,
-        Font = new Font("Segoe UI", size, style),
+        Font = font,
         ForeColor = color,
-        BackColor = Color.Transparent,
-        AutoSize = true
+        AutoSize = true,
+        UseMnemonic = false
     };
 
-    static Button MakeButton(string text, int width, Color backColor, Color foreColor)
+    #region Layout
+
+    Control BuildHeader()
     {
-        var button = new Button
-        {
-            Text = text,
-            Size = new Size(width, 44),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = backColor,
-            ForeColor = foreColor,
-            Font = new Font("Segoe UI Semibold", 10),
-            Cursor = Cursors.Hand
-        };
-        button.FlatAppearance.BorderSize = 0;
-        return button;
+        var title = NewLabel("Taildrop", UiFonts.Display, Palette.Ink);
+        title.Dock = DockStyle.Left;
+        title.TextAlign = ContentAlignment.MiddleLeft;
+
+        var subtitle = NewLabel("Phone to this computer, privately over Tailscale", UiFonts.Small, Palette.Muted);
+        subtitle.AutoSize = false;
+        subtitle.Dock = DockStyle.Fill;
+        subtitle.TextAlign = ContentAlignment.BottomLeft;
+        subtitle.Padding = new Padding(12, 0, 0, 10);
+
+        var header = new Panel { Dock = DockStyle.Top, Height = 52 };
+        header.Controls.Add(subtitle);
+        header.Controls.Add(title);
+        return header;
     }
+
+    Control BuildConnectCard()
+    {
+        var card = new CardPanel { Dock = DockStyle.Left, Width = 340, Padding = new Padding(18) };
+
+        var heading = NewLabel("Connect your phone", UiFonts.Heading, Palette.Ink);
+        heading.AutoSize = false;
+        heading.Dock = DockStyle.Top;
+        heading.Height = 28;
+        heading.TextAlign = ContentAlignment.MiddleLeft;
+
+        _statusLabel.AutoSize = false;
+        _statusLabel.Dock = DockStyle.Fill;
+        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _statusLabel.Padding = new Padding(6, 0, 0, 0);
+        _statusDot.Dock = DockStyle.Left;
+        var statusRow = new Panel { Dock = DockStyle.Top, Height = 26 };
+        statusRow.Controls.Add(_statusLabel);
+        statusRow.Controls.Add(_statusDot);
+
+        _captionLabel.AutoSize = false;
+        _captionLabel.Dock = DockStyle.Top;
+        _captionLabel.Height = 24;
+        _captionLabel.TextAlign = ContentAlignment.MiddleLeft;
+
+        _qrView.Dock = DockStyle.Fill;
+        _qrView.Click += (_, _) => ShowQrDialog();
+
+        _messageLabel.AutoSize = false;
+        _messageLabel.Dock = DockStyle.Bottom;
+        _messageLabel.Height = 52;
+        _messageLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _messageLabel.Padding = new Padding(0, 4, 0, 4);
+        _messageLabel.AutoEllipsis = true;
+
+        _copyButton.Dock = DockStyle.Bottom;
+        _copyButton.Enabled = false;
+        _copyButton.Click += CopyButton_Click;
+
+        // Fill first, then edge docks; the last one added is laid out first (heading topmost, Copy lowest).
+        card.Controls.Add(_qrView);
+        card.Controls.Add(_messageLabel);
+        card.Controls.Add(_copyButton);
+        card.Controls.Add(_captionLabel);
+        card.Controls.Add(statusRow);
+        card.Controls.Add(heading);
+        return card;
+    }
+
+    Control BuildInboxPane()
+    {
+        var pane = new Panel { Dock = DockStyle.Fill };
+
+        var title = NewLabel("Inbox", UiFonts.Heading, Palette.Ink);
+        title.Dock = DockStyle.Left;
+        title.TextAlign = ContentAlignment.MiddleLeft;
+        var hint = NewLabel("Double-click to open  ·  drag files out to Explorer", UiFonts.Small, Palette.Muted);
+        hint.AutoSize = false;
+        hint.Dock = DockStyle.Fill;
+        hint.TextAlign = ContentAlignment.MiddleRight;
+        hint.AutoEllipsis = true;
+        var headingRow = new Panel { Dock = DockStyle.Top, Height = 34 };
+        headingRow.Controls.Add(hint);
+        headingRow.Controls.Add(title);
+
+        ConfigureList();
+        var listCard = new CardPanel { Dock = DockStyle.Fill, Padding = new Padding(6) };
+        _fileList.Dock = DockStyle.Fill;
+        _emptyState.Dock = DockStyle.Fill;
+        listCard.Controls.Add(_fileList);
+        listCard.Controls.Add(_emptyState);
+
+        var spacer = new Panel { Dock = DockStyle.Bottom, Height = 12 };
+
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 46, WrapContents = false, FlowDirection = FlowDirection.LeftToRight };
+        foreach (var button in new[] { _saveSelectedButton, _saveAllButton, _removeButton })
+        {
+            button.Margin = new Padding(0, 0, 8, 0);
+            button.Enabled = false;
+            actions.Controls.Add(button);
+        }
+        _saveSelectedButton.Click += async (_, _) => await SaveInboxItemsAsync(SelectedItems());
+        _saveAllButton.Click += async (_, _) => await SaveInboxItemsAsync(_fileList.Items.Cast<ListViewItem>());
+        _removeButton.Click += (_, _) => RemoveSelected();
+
+        _resultLabel.Margin = new Padding(0, 6, 0, 0);
+        _revealLink.Text = "Show in folder";
+        _revealLink.LinkArea = new LinkArea(0, _revealLink.Text.Length); // the whole label is the link
+        _revealLink.Font = UiFonts.Small;
+        _revealLink.AutoSize = true;
+        _revealLink.Margin = new Padding(6, 6, 0, 0);
+        _revealLink.LinkColor = Palette.Green;
+        _revealLink.ActiveLinkColor = Color.FromArgb(20, 80, 44);
+        _revealLink.VisitedLinkColor = Palette.Green;
+        _revealLink.LinkBehavior = LinkBehavior.HoverUnderline;
+        _revealLink.UseMnemonic = false;
+        _revealLink.Visible = false;
+        _revealLink.LinkClicked += (_, _) => RevealInExplorer();
+        var statusRow = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 28, WrapContents = false, FlowDirection = FlowDirection.LeftToRight };
+        statusRow.Controls.Add(_resultLabel);
+        statusRow.Controls.Add(_revealLink);
+
+        var footer = NewLabel("Closing Taildrop permanently deletes anything left here.", UiFonts.Caption, Palette.Muted);
+        footer.AutoSize = false;
+        footer.Dock = DockStyle.Bottom;
+        footer.Height = 24;
+        footer.TextAlign = ContentAlignment.MiddleLeft;
+
+        // Fill first; bottom stack is laid out last-added-first (footer lowest, then status, actions, gap).
+        pane.Controls.Add(listCard);
+        pane.Controls.Add(spacer);
+        pane.Controls.Add(actions);
+        pane.Controls.Add(statusRow);
+        pane.Controls.Add(footer);
+        pane.Controls.Add(headingRow);
+
+        BuildMenu();
+        return pane;
+    }
+
+    void ConfigureList()
+    {
+        _fileList.View = View.Details;
+        _fileList.FullRowSelect = true;
+        _fileList.MultiSelect = true;
+        _fileList.HideSelection = false;
+        _fileList.GridLines = false;
+        _fileList.BorderStyle = BorderStyle.None;
+        _fileList.BackColor = Palette.Surface;
+        _fileList.ForeColor = Palette.Ink;
+        _fileList.Font = UiFonts.Body;
+        _fileList.HeaderStyle = ColumnHeaderStyle.Nonclickable;
+        _fileList.OwnerDraw = true;
+        _fileList.LabelEdit = true;
+        _fileList.SmallImageList = _rowSizer;
+        _fileList.AccessibleName = "Inbox files";
+        _fileList.Visible = false; // the empty state shows until the first file arrives
+        _fileList.Columns.Add("Name", 300);
+        _fileList.Columns.Add("Size", 90);
+        _fileList.Columns.Add("Received", 110);
+
+        _fileList.ItemDrag += FileList_ItemDrag;
+        _fileList.SelectedIndexChanged += (_, _) => { if (!_rebuilding) UpdateActionStates(); };
+        _fileList.MouseDoubleClick += FileList_MouseDoubleClick;
+        _fileList.MouseDown += FileList_MouseDown;
+        _fileList.KeyDown += FileList_KeyDown;
+        _fileList.BeforeLabelEdit += FileList_BeforeLabelEdit;
+        _fileList.AfterLabelEdit += FileList_AfterLabelEdit;
+        _fileList.DrawColumnHeader += FileList_DrawColumnHeader;
+        _fileList.DrawItem += FileList_DrawItem;
+        _fileList.ClientSizeChanged += (_, _) => LayoutColumns();
+        _fileList.GotFocus += (_, _) => _fileList.Invalidate();
+        _fileList.LostFocus += (_, _) => _fileList.Invalidate();
+        _fileList.ContextMenuStrip = _menu;
+    }
+
+    void BuildMenu()
+    {
+        _openItem.Font = UiFonts.BodyStrong;
+        _openItem.Click += (_, _) => OpenItems(SelectedItems());
+        _saveItem.Click += async (_, _) => await SaveInboxItemsAsync(SelectedItems());
+        _renameItem.Click += (_, _) => BeginRename();
+        _removeItem.Click += (_, _) => RemoveSelected();
+        _menu.Items.AddRange(new ToolStripItem[] { _openItem, _saveItem, _renameItem, new ToolStripSeparator(), _removeItem });
+        _menu.Opening += (_, e) =>
+        {
+            if (_editing || _fileList.SelectedItems.Count == 0) { e.Cancel = true; return; }
+            _renameItem.Enabled = _fileList.SelectedItems.Count == 1;
+        };
+    }
+
+    void LayoutColumns()
+    {
+        var total = _fileList.ClientSize.Width;
+        if (total <= 0) return;
+        var size = this.Px(90);
+        var received = this.Px(110);
+        _fileList.SetColumnWidths(Math.Max(this.Px(160), total - size - received), size, received);
+    }
+
+    #endregion
+
+    #region Startup, shutdown, server
 
     async void MainForm_Shown(object? sender, EventArgs e)
     {
@@ -194,6 +373,7 @@ sealed class MainForm : Form
         _cleanupStarted = true;
         e.Cancel = true;
         _inboxTimer.Stop();
+        _statusTimer.Stop();
         await StopTaildropAsync();
         RemoveTemporaryInbox();
         Close();
@@ -237,39 +417,41 @@ sealed class MainForm : Form
 
     async Task StartTaildropAsync()
     {
-        await StopTaildropAsync();
-
-        var tailscaleIp = GetTailscaleIPv4();
-        if (tailscaleIp is null)
-        {
-            SetErrorState("Connect Tailscale on this computer, then reopen this app.");
-            return;
-        }
-
-        _taildropUrl = $"http://{tailscaleIp}:{Port}";
+        _starting = true;
         try
         {
-            _server = new TaildropServer(_inboxPath!);
-            await _server.StartAsync(IPAddress.Parse(tailscaleIp), Port);
-            StartCleanupWatcher(Environment.ProcessId);
-        }
-        catch (Exception ex)
-        {
+            SetStartingState();
             await StopTaildropAsync();
-            SetErrorState(ex.Message.Contains("already in use") || ex.Message.Contains("address")
-                ? "Port 8787 is busy or the receiver could not start."
-                : ex.Message);
-            return;
-        }
 
-        _statusDot.BackColor = Green;
-        _statusLabel.Text = "Ready - keep this window open";
-        _statusLabel.ForeColor = Green;
-        _promptLabel.Text = "Scan the QR code with your phone";
-        _urlLabel.Text = _taildropUrl;
-        _urlLabel.ForeColor = Muted;
-        _qrButton.Enabled = true;
-        _copyButton.Enabled = true;
+            var tailscaleIp = await Task.Run(GetTailscaleIPv4);
+            if (tailscaleIp is null)
+            {
+                SetErrorState("Connect Tailscale on this computer, then click Try again.");
+                return;
+            }
+
+            _taildropUrl = $"http://{tailscaleIp}:{Port}";
+            try
+            {
+                _server = new TaildropServer(_inboxPath!);
+                await _server.StartAsync(IPAddress.Parse(tailscaleIp), Port);
+                if (_cleanupProcess is null) StartCleanupWatcher(Environment.ProcessId);
+            }
+            catch (Exception ex)
+            {
+                await StopTaildropAsync();
+                SetErrorState(ex.Message.Contains("already in use") || ex.Message.Contains("address")
+                    ? $"Port {Port} is busy or the receiver could not start. Close any other program using it, then click Try again."
+                    : ex.Message);
+                return;
+            }
+
+            SetReadyState(_taildropUrl);
+        }
+        finally
+        {
+            _starting = false;
+        }
     }
 
     async Task StopTaildropAsync()
@@ -289,166 +471,146 @@ sealed class MainForm : Form
         }
     }
 
-    void SetErrorState(string message)
+    #endregion
+
+    #region Connect card state
+
+    void SetStartingState()
     {
-        _statusDot.BackColor = Red;
-        _statusLabel.Text = "Not running";
-        _statusLabel.ForeColor = Red;
-        _promptLabel.Text = "Could not start Taildrop";
-        _urlLabel.Text = message;
-        _urlLabel.ForeColor = Red;
-        _qrButton.Enabled = false;
+        _failed = false;
+        _statusDot.DotColor = Palette.Muted;
+        _statusDot.Halo = false;
+        _statusLabel.Text = "Starting...";
+        _statusLabel.ForeColor = Palette.Muted;
+        _captionLabel.Text = "";
+        SetQr(null, "Starting...");
+        _messageLabel.Font = UiFonts.Body;
+        _messageLabel.Text = "Finding your Tailscale address...";
+        _messageLabel.ForeColor = Palette.Muted;
+        _copyTimer.Stop();
+        _copyButton.Text = "Copy link";
         _copyButton.Enabled = false;
     }
 
-    void CopyButton_Click(object? sender, EventArgs e)
+    void SetReadyState(string url)
     {
+        _failed = false;
+        _statusDot.DotColor = Palette.Green;
+        _statusDot.Halo = true;
+        _statusLabel.Text = "Ready - keep this window open";
+        _statusLabel.ForeColor = Palette.Green;
+        _captionLabel.Text = "Scan with your phone's camera";
+        try
+        {
+            SetQr(CreateQrBitmap(url), "");
+        }
+        catch
+        {
+            SetQr(null, "QR code unavailable. Use the link below.");
+        }
+        _messageLabel.Font = UiFonts.BodyStrong;
+        _messageLabel.Text = url;
+        _messageLabel.ForeColor = Palette.Ink;
+        _copyButton.Text = "Copy link";
+        _copyButton.Enabled = true;
+    }
+
+    void SetErrorState(string message)
+    {
+        _failed = true;
+        _statusDot.DotColor = Palette.Red;
+        _statusDot.Halo = false;
+        _statusLabel.Text = "Not running";
+        _statusLabel.ForeColor = Palette.Red;
+        _captionLabel.Text = "";
+        SetQr(null, "No QR code yet");
+        _messageLabel.Font = UiFonts.Small;
+        _messageLabel.Text = message;
+        _messageLabel.ForeColor = Palette.Red;
+        _copyTimer.Stop();
+        _copyButton.Text = "Try again";
+        _copyButton.Enabled = true;
+    }
+
+    void SetQr(Bitmap? bitmap, string placeholder)
+    {
+        _qrView.Image = bitmap;
+        _qrView.Placeholder = placeholder;
+        _qrBitmap?.Dispose();
+        _qrBitmap = bitmap;
+    }
+
+    static Bitmap CreateQrBitmap(string url)
+    {
+        using var stream = new MemoryStream(QrCode.GeneratePng(url));
+        using var source = Image.FromStream(stream);
+        return new Bitmap(source); // detached copy: the stream can go away
+    }
+
+    async void CopyButton_Click(object? sender, EventArgs e)
+    {
+        if (_failed)
+        {
+            if (_starting || _inboxPath is null) return;
+            try { await StartTaildropAsync(); }
+            catch (Exception ex) { SetErrorState(ex.Message); }
+            return;
+        }
+
         if (_taildropUrl is null) return;
-        Clipboard.SetText(_taildropUrl);
+        try { Clipboard.SetText(_taildropUrl); }
+        catch
+        {
+            ShowStatus("Could not reach the clipboard. Please try again.", Palette.Red);
+            return;
+        }
         _copyButton.Text = "Copied";
         _copyTimer.Stop();
         _copyTimer.Start();
     }
 
-    void QrButton_Click(object? sender, EventArgs e)
+    void ShowQrDialog()
     {
-        if (_taildropUrl is null) return;
+        if (_qrBitmap is null || _taildropUrl is null) return;
+        using var dialog = new QrDialog(_qrBitmap, _taildropUrl);
+        dialog.ShowDialog(this);
+    }
+
+    #endregion
+
+    #region Inline status
+
+    /// <summary>One status line under the inbox actions: replaces modal "done" dialogs. With a path it adds a "Show in folder" link.</summary>
+    void ShowStatus(string text, Color color, string? revealPath = null)
+    {
+        _statusTimer.Stop();
+        _resultLabel.Text = revealPath is null ? text : text + "  ·"; // the link's left margin supplies the space after the dot
+        _resultLabel.ForeColor = color;
+        _revealPath = revealPath;
+        _revealLink.Visible = revealPath is not null;
+        if (text.Length > 0) _statusTimer.Start();
+    }
+
+    void RevealInExplorer()
+    {
+        if (_revealPath is not { } path) return;
         try
         {
-            var bytes = QrCode.GeneratePng(_taildropUrl);
-            using var stream = new MemoryStream(bytes);
-            using var sourceImage = Image.FromStream(stream);
-            var bitmap = new Bitmap(sourceImage);
-
-            using var qrForm = new Form
-            {
-                Text = "Scan to connect",
-                ClientSize = new Size(430, 500),
-                StartPosition = FormStartPosition.CenterParent,
-                BackColor = White,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
-                MaximizeBox = false,
-                MinimizeBox = false
-            };
-            var qrTitle = MakeLabel("Scan with your phone", 18, FontStyle.Bold, Ink);
-            qrTitle.Location = new Point(104, 20);
-            qrForm.Controls.Add(qrTitle);
-            var picture = new PictureBox
-            {
-                Image = bitmap,
-                SizeMode = PictureBoxSizeMode.Zoom,
-                Size = new Size(360, 360),
-                Location = new Point(35, 70)
-            };
-            qrForm.Controls.Add(picture);
-            var hint = MakeLabel("Tailscale must be connected on your phone.", 9, FontStyle.Regular, Muted);
-            hint.Location = new Point(88, 453);
-            qrForm.Controls.Add(hint);
-            qrForm.FormClosed += (_, _) => { picture.Image?.Dispose(); };
-            qrForm.ShowDialog(this);
+            // One Arguments string on purpose: ArgumentList would escape the quotes and break /select,.
+            var arguments = File.Exists(path)
+                ? $"/select,\"{path}\""
+                : $"\"{Path.GetDirectoryName(path)}\"";
+            using var explorer = Process.Start(new ProcessStartInfo("explorer.exe") { Arguments = arguments, UseShellExecute = false });
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Could not create the QR code.\r\n{ex.Message}", "Taildrop", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowStatus($"Could not open File Explorer: {ex.Message}", Palette.Red);
         }
     }
 
-    void FileList_ItemDrag(object? sender, ItemDragEventArgs e)
-    {
-        var paths = new System.Collections.Specialized.StringCollection();
-        foreach (ListViewItem item in _fileList.SelectedItems)
-        {
-            if (item.Tag is string path && File.Exists(path)) paths.Add(path);
-        }
-        if (paths.Count > 0)
-        {
-            var data = new DataObject();
-            data.SetFileDropList(paths);
-            _fileList.DoDragDrop(data, DragDropEffects.Copy);
-        }
-    }
+    #endregion
 
-    void RefreshTemporaryInbox()
-    {
-        if (_inboxPath is null || !Directory.Exists(_inboxPath)) return;
-        var selectedNames = _fileList.SelectedItems.Cast<ListViewItem>().Select(i => i.Text).ToHashSet();
-
-        var files = new DirectoryInfo(_inboxPath).GetFiles()
-            .Where(f => !(f.Name.StartsWith(".taildrop-", StringComparison.Ordinal) && f.Name.EndsWith(".part", StringComparison.Ordinal)))
-            .OrderByDescending(f => f.LastWriteTime)
-            .ToList();
-
-        var newSignature = string.Join("\n", files.Select(f => $"{f.Name}|{FormatFileSize(f.Length)}|{f.LastWriteTime:h:mm:ss tt}"));
-        if (_lastSignature != newSignature)
-        {
-            _lastSignature = newSignature;
-            _fileList.BeginUpdate();
-            _fileList.Items.Clear();
-            foreach (var file in files)
-            {
-                var item = new ListViewItem(file.Name);
-                item.SubItems.Add(FormatFileSize(file.Length));
-                item.SubItems.Add(file.LastWriteTime.ToString("h:mm:ss tt"));
-                item.Tag = file.FullName;
-                if (selectedNames.Contains(file.Name)) item.Selected = true;
-                _fileList.Items.Add(item);
-            }
-            _fileList.EndUpdate();
-        }
-
-        var hasFiles = files.Count > 0;
-        _emptyLabel.Visible = !hasFiles;
-        _saveAllButton.Enabled = hasFiles;
-        _saveSelectedButton.Enabled = _fileList.SelectedItems.Count > 0;
-    }
-
-    static string FormatFileSize(long bytes)
-    {
-        if (bytes >= 1L << 30) return $"{bytes / (double)(1L << 30):N1} GB";
-        if (bytes >= 1L << 20) return $"{bytes / (double)(1L << 20):N1} MB";
-        if (bytes >= 1L << 10) return $"{bytes / (double)(1L << 10):N0} KB";
-        return $"{bytes} B";
-    }
-
-    static string GetAvailableSavePath(string folder, string name)
-    {
-        var candidate = Path.Combine(folder, name);
-        if (!File.Exists(candidate)) return candidate;
-        var extension = Path.GetExtension(name);
-        var stem = Path.GetFileNameWithoutExtension(name);
-        for (var i = 1; i < 10000; i++)
-        {
-            candidate = Path.Combine(folder, $"{stem} ({i}){extension}");
-            if (!File.Exists(candidate)) return candidate;
-        }
-        return Path.Combine(folder, $"{stem}-{Guid.NewGuid():N}{extension}");
-    }
-
-    void SaveInboxItems(IEnumerable<ListViewItem> items)
-    {
-        var list = items.ToList();
-        if (list.Count == 0) return;
-        using var picker = new FolderBrowserDialog
-        {
-            Description = "Choose where these files should be saved",
-            SelectedPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            ShowNewFolderButton = true
-        };
-        if (picker.ShowDialog(this) == DialogResult.OK)
-        {
-            var saved = 0;
-            foreach (var item in list)
-            {
-                if (item.Tag is string sourcePath && File.Exists(sourcePath))
-                {
-                    var destination = GetAvailableSavePath(picker.SelectedPath, item.Text);
-                    File.Copy(sourcePath, destination, overwrite: false);
-                    saved++;
-                }
-            }
-            MessageBox.Show($"Saved {saved} file{(saved == 1 ? "" : "s")}.", "Taildrop", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-    }
+    #region Tailscale discovery
 
     static string? FindTailscaleExe()
     {
@@ -513,4 +675,6 @@ sealed class MainForm : Form
         }
         return null;
     }
+
+    #endregion
 }

@@ -34,4 +34,22 @@
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
   </ItemGroup>
 
+  <!--
+    The OpenCV runtime package ships a large opencv_videoio_ffmpeg*.dll (video file/stream I/O) that document
+    scanning never uses. Keep it out of the published single file and out of the build output.
+  -->
+  <Target Name="DropUnusedOpenCvFfmpegFromPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_UnusedOpenCvFfmpegPublish Include="@(ResolvedFileToPublish)" Condition="$([System.String]::Copy('%(Filename)').StartsWith('opencv_videoio_ffmpeg'))" />
+      <ResolvedFileToPublish Remove="@(_UnusedOpenCvFfmpegPublish)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="DropUnusedOpenCvFfmpegFromOutput" BeforeTargets="_CopyFilesMarkedCopyLocal">
+    <ItemGroup>
+      <_UnusedOpenCvFfmpegCopy Include="@(ReferenceCopyLocalPaths)" Condition="$([System.String]::Copy('%(Filename)').StartsWith('opencv_videoio_ffmpeg'))" />
+      <ReferenceCopyLocalPaths Remove="@(_UnusedOpenCvFfmpegCopy)" />
+    </ItemGroup>
+  </Target>
+
 </Project>
