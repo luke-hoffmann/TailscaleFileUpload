@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Taildrop.Core.Scanning;
 
 namespace Taildrop.Core;
 
@@ -23,9 +24,10 @@ sealed class UploadException : Exception
     }
 }
 
-public sealed class TaildropServer : IAsyncDisposable
+public sealed partial class TaildropServer : IAsyncDisposable
 {
     const long MaxFileSize = 5L * 1024 * 1024 * 1024; // 5 GB
+    static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     static readonly Regex InvalidChars = new(@"[<>:""/\\|?*\u0000-\u001F]", RegexOptions.Compiled);
     static readonly Regex DotRun = new(@"\.\.+", RegexOptions.Compiled);
     static readonly Regex TrailingDotsSpaces = new(@"[. ]+$", RegexOptions.Compiled);
@@ -56,19 +58,6 @@ public sealed class TaildropServer : IAsyncDisposable
         await _app.StartAsync();
     }
 
-    /// <summary>
-    /// The desktop UI renamed a file in the inbox. Lets the server keep any scan session that produced
-    /// the file pointing at its new name.
-    /// </summary>
-    public void OnInboxFileRenamed(string oldName, string newName)
-    {
-    }
-
-    /// <summary>The desktop UI deleted a file from the inbox (so its scan session, if any, can be dropped).</summary>
-    public void OnInboxFileRemoved(string name)
-    {
-    }
-
     public async Task StopAsync()
     {
         if (_app is null) return;
@@ -91,7 +80,7 @@ public sealed class TaildropServer : IAsyncDisposable
         {
             if (req.Method == "GET" && req.Path == "/api/health")
             {
-                await JsonAsync(res, 200, new { ready = true });
+                await JsonAsync(res, 200, new { ready = true, scan = ScanAvailable });
                 return;
             }
             if (req.Method == "GET" && req.Path == "/api/qr")
@@ -102,6 +91,11 @@ public sealed class TaildropServer : IAsyncDisposable
             if (req.Method == "POST" && req.Path == "/api/upload")
             {
                 await UploadAsync(context);
+                return;
+            }
+            if (req.Path.StartsWithSegments("/api/scan", out var scanRest))
+            {
+                await ScanAsync(context, scanRest.Value ?? "");
                 return;
             }
             if (req.Path.StartsWithSegments("/api"))
@@ -119,6 +113,11 @@ public sealed class TaildropServer : IAsyncDisposable
         catch (UploadException error)
         {
             if (!res.HasStarted) await JsonAsync(res, error.StatusCode, new { error = error.PublicMessage });
+            else context.Abort();
+        }
+        catch (ScanException error)
+        {
+            if (!res.HasStarted) await JsonAsync(res, error.StatusCode, new { error = error.Message });
             else context.Abort();
         }
         catch (Exception error) when (error is not OperationCanceledException)
@@ -299,7 +298,7 @@ public sealed class TaildropServer : IAsyncDisposable
 
     static async Task JsonAsync(HttpResponse res, int status, object body)
     {
-        var data = JsonSerializer.SerializeToUtf8Bytes(body);
+        var data = JsonSerializer.SerializeToUtf8Bytes(body, JsonOptions);
         res.StatusCode = status;
         res.ContentType = "application/json; charset=utf-8";
         res.ContentLength = data.Length;
