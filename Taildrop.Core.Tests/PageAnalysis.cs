@@ -5,8 +5,12 @@ namespace Taildrop.Core.Tests;
 /// <summary>Finds the synthetic page's red corner markers and straight reference bars in a flattened page.</summary>
 static class PageAnalysis
 {
-    /// <summary>Centres of red blobs, as fractions of width/height.</summary>
-    public static List<Point2d> FindMarkers(Mat flat)
+    /// <summary>
+    /// Centres of red blobs, as fractions of width/height. When <paramref name="intactAgainst"/> is given
+    /// (page size in texels), a blob only counts if at least 70% of a whole marker's area is present, so a
+    /// marker clipped by the crop is reported as missing.
+    /// </summary>
+    public static List<Point2d> FindMarkers(Mat flat, (int Wide, int High)? intactAgainst = null)
     {
         using var bgr = flat.Channels() == 3 ? flat.Clone() : flat.CvtColor(ColorConversionCodes.GRAY2BGR);
         using var mask = new Mat();
@@ -16,6 +20,8 @@ static class PageAnalysis
         using var centroids = new Mat();
         var count = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centroids);
         var minArea = flat.Width * flat.Height * 0.00015;
+        if (intactAgainst is { } page)
+            minArea = 0.7 * (30.0 * flat.Width / page.Wide) * (30.0 * flat.Height / page.High); // markers are 30x30 texels
         var result = new List<Point2d>();
         for (var i = 1; i < count; i++)
         {

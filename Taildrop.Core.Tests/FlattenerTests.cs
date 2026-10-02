@@ -33,7 +33,7 @@ public class FlattenerTests
         Assert.InRange((double)flat.Width / flat.Height / scene.TrueAspect, 0.97, 1.03);
 
         // All four corner markers present, each in its own corner: nothing at the edges was cut off.
-        var markers = PageAnalysis.FindMarkers(flat);
+        var markers = PageAnalysis.FindMarkers(flat, (scene.PageTexelsWide, scene.PageTexelsHigh));
         Assert.Equal(4, markers.Count);
         var dx = SyntheticScene.MarkerCenterInset / (double)scene.PageTexelsWide;
         var dy = SyntheticScene.MarkerCenterInset / (double)scene.PageTexelsHigh;

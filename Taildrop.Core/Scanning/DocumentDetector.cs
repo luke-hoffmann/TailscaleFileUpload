@@ -5,8 +5,9 @@ namespace Taildrop.Core.Scanning;
 /// <summary>
 /// Finds the page in a photo: the whole outline (not just four corner points), so curled receipts,
 /// folded sheets and dog-eared corners are captured completely. Several independent ways of
-/// segmenting the paper (strong edges, bright pixels, neutral-colored pixels) each propose an outline;
-/// the best-scoring plausible one wins and is refined with GrabCut.
+/// segmenting the paper (strong edges, weak edges, bright pixels, neutral-colored pixels) each propose an
+/// outline; the best-scoring plausible one wins. (A GrabCut refinement was tried and removed: it was
+/// non-deterministic and clipped colored corners.)
 /// </summary>
 public static class DocumentDetector
 {
@@ -27,9 +28,6 @@ public static class DocumentDetector
         using var context = new Analysis(small);
         var best = FindBestCandidate(context);
         if (best is null) return ScanOutline.FullFrame();
-
-        var refined = Refine(context, best);
-        if (refined is not null) best = refined;
 
         var outline = BuildOutline(best.Contour, small.Size());
         if (outline is null) return ScanOutline.FullFrame();
@@ -119,9 +117,9 @@ public static class DocumentDetector
         using var cleaned = new Mat();
         Cv2.MorphologyEx(a.Gray, cleaned, MorphTypes.Close, closeKernel);
         using var smooth = new Mat();
-        Cv2.GaussianBlur(cleaned, smooth, new Size(0, 0), 2.0);
+        Cv2.GaussianBlur(cleaned, smooth, new Size(0, 0), 2.5);
         using var edges = new Mat();
-        Cv2.Canny(smooth, edges, 6, 16);
+        Cv2.Canny(smooth, edges, 3.5, 9);
         using var join = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(9, 9));
         var closed = new Mat();
         Cv2.MorphologyEx(edges, closed, MorphTypes.Close, join);
@@ -298,71 +296,6 @@ public static class DocumentDetector
         double bx = next.X - corner.X, by = next.Y - corner.Y;
         var cos = (ax * bx + ay * by) / (Math.Sqrt(ax * ax + ay * ay) * Math.Sqrt(bx * bx + by * by) + 1e-9);
         return Math.Acos(Math.Clamp(cos, -1, 1)) * 180 / Math.PI;
-    }
-
-    // ---- refinement -----------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// GrabCut inside a band around the candidate: snaps the boundary onto the real paper edge (including
-    /// curls and dog-ears) where a plain threshold leaves ragged or leaky outlines. Kept only if it still
-    /// looks like the same page and scores at least as well.
-    /// </summary>
-    static Candidate? Refine(Analysis a, Candidate candidate)
-    {
-        var shrink = Math.Min(1.0, 640.0 / Math.Max(a.Size.Width, a.Size.Height));
-        using var image = new Mat();
-        if (shrink < 1) Cv2.Resize(a.Bgr, image, new Size(), shrink, shrink, InterpolationFlags.Area);
-        else a.Bgr.CopyTo(image);
-
-        var polygon = candidate.Contour.Select(p => new Point((int)Math.Round(p.X * shrink), (int)Math.Round(p.Y * shrink))).ToArray();
-        using var inside = new Mat(image.Size(), MatType.CV_8UC1, Scalar.All(0));
-        Cv2.FillPoly(inside, new[] { polygon }, Scalar.All(255));
-
-        var band = Math.Max(4, (int)(Math.Min(image.Width, image.Height) * 0.045));
-        using var coreKernel = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(band * 2 + 1, band * 2 + 1));
-        using var core = new Mat();
-        using var outer = new Mat();
-        Cv2.Erode(inside, core, coreKernel);
-        Cv2.Dilate(inside, outer, coreKernel);
-
-        // 0 = sure background, 1 = sure foreground, 2 = probably background, 3 = probably foreground.
-        using var mask = new Mat(image.Size(), MatType.CV_8UC1, Scalar.All(0));
-        mask.SetTo(Scalar.All(2), outer);
-        mask.SetTo(Scalar.All(3), inside);
-        mask.SetTo(Scalar.All(1), core);
-
-        try
-        {
-            using var background = new Mat();
-            using var foreground = new Mat();
-            Cv2.GrabCut(image, mask, default, background, foreground, 4, GrabCutModes.InitWithMask);
-        }
-        catch (OpenCVException)
-        {
-            return null;
-        }
-
-        using var result = new Mat();
-        using var fg = new Mat();
-        using var pfg = new Mat();
-        Cv2.Compare(mask, Scalar.All(1), fg, CmpTypes.EQ);
-        Cv2.Compare(mask, Scalar.All(3), pfg, CmpTypes.EQ);
-        Cv2.BitwiseOr(fg, pfg, result);
-        using var smooth = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(5, 5));
-        Cv2.MorphologyEx(result, result, MorphTypes.Open, smooth);
-        Cv2.MorphologyEx(result, result, MorphTypes.Close, smooth);
-
-        Cv2.FindContours(result, out var contours, out _, RetrievalModes.External, ContourApproximationModes.ApproxNone);
-        var largest = contours.OrderByDescending(c => Cv2.ContourArea(c)).FirstOrDefault();
-        if (largest is null) return null;
-
-        var refinedArea = Cv2.ContourArea(largest);
-        var originalArea = Cv2.ContourArea(polygon);
-        if (originalArea < 1 || refinedArea / originalArea is < 0.8 or > 1.25) return null;
-
-        var contour = largest.Select(p => new Point((int)Math.Round(p.X / shrink), (int)Math.Round(p.Y / shrink))).ToArray();
-        var score = Score(a, contour);
-        return score >= candidate.Score - 0.02 ? new Candidate { Contour = contour, Score = score, Source = candidate.Source + "+grabcut" } : null;
     }
 
     // ---- outline construction -------------------------------------------------------------------------------

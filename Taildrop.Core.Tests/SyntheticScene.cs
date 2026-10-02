@@ -52,6 +52,8 @@ sealed class SyntheticScene : IDisposable
     {
         Options = options;
         var rng = new Random(options.Seed);
+        // OpenCV's noise generator is thread-local and shared; pin it so every scene is reproducible.
+        Cv2.SetTheRNG((ulong)(options.Seed * 2654435761L + 1));
         PageTexelsWide = (int)(options.PageMmWidth * TexelsPerMm);
         PageTexelsHigh = (int)(options.PageMmHeight * TexelsPerMm);
         TrueAspect = options.PageMmWidth / options.PageMmHeight;

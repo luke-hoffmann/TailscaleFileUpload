@@ -26,6 +26,8 @@ public class DetectorSurvey
             ("snake", new SceneOptions { SnakePx = 18 }),
             ("pillow", new SceneOptions { PillowXPx = 24, PillowYPx = 16 }),
             ("receipt-curled", new SceneOptions { PageMmWidth = 80, PageMmHeight = 240, TiltDeg = 25, YawDeg = 8, RollDeg = -14, Fill = 0.8, PillowXPx = 20 }),
+            ("receipt-tan", new SceneOptions { PageMmWidth = 80, PageMmHeight = 240, TiltDeg = 25, YawDeg = 8, RollDeg = -14, Fill = 0.8, PillowXPx = 20, Backdrop = Backdrop.TanWood }),
+            ("receipt-blue", new SceneOptions { PageMmWidth = 80, PageMmHeight = 240, TiltDeg = 20, YawDeg = -10, RollDeg = 12, Fill = 0.75, SnakePx = 12, PillowXPx = 14, Backdrop = Backdrop.BlueCloth }),
             ("receipt-granite", new SceneOptions { PageMmWidth = 80, PageMmHeight = 240, Backdrop = Backdrop.Granite, TiltDeg = 10, YawDeg = 0, RollDeg = 20, Fill = 0.55, SnakePx = 10 }),
             ("portrait", new SceneOptions { Width = 1200, Height = 1600, RollDeg = 0, TiltDeg = 15, YawDeg = 10, Fill = 0.7 }),
             ("steep", new SceneOptions { TiltDeg = 38, YawDeg = -20, RollDeg = -10 }),
@@ -42,7 +44,7 @@ public class DetectorSurvey
             clock.Restart();
             using var flat = PageFlattener.Flatten(scene.Photo, outline);
             var flatMs = clock.ElapsedMilliseconds;
-            var markers = PageAnalysis.FindMarkers(flat).Count;
+            var markers = PageAnalysis.FindMarkers(flat, (scene.PageTexelsWide, scene.PageTexelsHigh)).Count;
             var bars = PageAnalysis.MeasureBars(flat, SyntheticScene.BarFractions);
             var worstOffset = bars.Max(b => Math.Abs(b.Offset));
             var worstSpread = bars.Max(b => b.Spread);
