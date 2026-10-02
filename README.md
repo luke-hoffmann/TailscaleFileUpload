@@ -82,7 +82,7 @@ used nor needed.
 ### Developing
 
 ```bash
-dotnet test Taildrop.sln --filter "FullyQualifiedName!~SamplePhotos"   # engine + server tests (Linux/macOS/Windows)
+dotnet test Taildrop.Core.Tests                                      # engine + server tests (Linux/macOS/Windows)
 dotnet run --project tools/DevHost                                     # phone page at http://127.0.0.1:8787
 
 # browser tests: needs Chromium (set PLAYWRIGHT_BROWSERS_PATH or let Playwright download one)

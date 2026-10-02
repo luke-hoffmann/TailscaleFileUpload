@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -251,7 +252,10 @@ await step('tapping a finished scan reopens it', async () => {
 });
 
 await step('retake removes the old page from the PC and takes its place', async () => {
-  const before = scans();
+  // Compare by content, not name: a retake within the same second legitimately reuses the freed file name.
+  const fingerprint = () => new Set(scans().map(name => crypto.createHash('sha1').update(fs.readFileSync(path.join(INBOX, name))).digest('hex')));
+  const before = fingerprint();
+  const count = scans().length;
   const title = await page.locator('#resultTitle').innerText();
   await page.click('#retake');
   await page.waitForSelector('#view-wait:not([hidden])');
@@ -259,10 +263,11 @@ await step('retake removes the old page from the PC and takes its place', async 
   await page.setInputFiles('#camera', sample('a4-tilted.jpg'));
   await page.waitForSelector('#view-result:not([hidden])', { timeout: 30000 });
   await page.waitForFunction(t => document.querySelector('#resultTitle').textContent === t, title);
-  const after = scans();
-  assert.equal(after.length, before.length, 'same number of scans');
-  assert.equal(after.filter(name => !before.includes(name)).length, 1, 'one new');
-  assert.equal(before.filter(name => !after.includes(name)).length, 1, 'one gone');
+  await page.waitForFunction(() => document.querySelector('#resultBusy').hidden);
+  const after = fingerprint();
+  assert.equal(scans().length, count, 'same number of scans');
+  assert.equal([...after].filter(hash => !before.has(hash)).length, 1, 'exactly one new page');
+  assert.equal([...before].filter(hash => !after.has(hash)).length, 1, 'exactly one old page gone');
   await page.click('#done');
 });
 
