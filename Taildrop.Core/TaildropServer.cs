@@ -56,6 +56,19 @@ public sealed class TaildropServer : IAsyncDisposable
         await _app.StartAsync();
     }
 
+    /// <summary>
+    /// The desktop UI renamed a file in the inbox. Lets the server keep any scan session that produced
+    /// the file pointing at its new name.
+    /// </summary>
+    public void OnInboxFileRenamed(string oldName, string newName)
+    {
+    }
+
+    /// <summary>The desktop UI deleted a file from the inbox (so its scan session, if any, can be dropped).</summary>
+    public void OnInboxFileRemoved(string name)
+    {
+    }
+
     public async Task StopAsync()
     {
         if (_app is null) return;
