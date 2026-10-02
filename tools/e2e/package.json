@@ -1,0 +1,8 @@
+{
+  "name": "taildrop-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser tests for the phone page, run against the real server (tools/DevHost).",
+  "scripts": { "test": "node phone.e2e.mjs" },
+  "devDependencies": { "playwright-core": "1.56.1" }
+}
