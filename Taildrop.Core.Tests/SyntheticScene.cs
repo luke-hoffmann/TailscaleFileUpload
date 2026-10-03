@@ -32,6 +32,8 @@ public sealed class SceneOptions
     /// <summary>Top-left corner folded over along a 45° line this many mm from the corner (0: none). The table shows
     /// where the corner was; the blank back of the flap lies on the page.</summary>
     public double DogEarMm;
+    /// <summary>Three binder holes along the left edge (the table shows through).</summary>
+    public bool HolePunches;
 }
 
 /// <summary>
@@ -113,6 +115,15 @@ sealed class SyntheticScene : IDisposable
                 rowX[x] = (float)page.X;
                 rowY[x] = (float)page.Y;
                 rowInside[x] = page.X >= 0 && page.X <= PageTexelsWide && page.Y >= 0 && page.Y <= PageTexelsHigh ? (byte)255 : (byte)0;
+                if (options.HolePunches && rowInside[x] != 0)
+                {
+                    var hx = page.X / TexelsPerMm - 10;
+                    foreach (var hy in new[] { 0.2, 0.5, 0.8 })
+                    {
+                        var dy = page.Y / TexelsPerMm - hy * options.PageMmHeight;
+                        if (hx * hx + dy * dy < 3.2 * 3.2) rowFold[x] = 1;
+                    }
+                }
                 if (d > 0 && rowInside[x] != 0)
                 {
                     if (page.X + page.Y < d) rowFold[x] = 1;
@@ -145,7 +156,7 @@ sealed class SyntheticScene : IDisposable
         }
         var photo = backdrop.Clone();
         page2.CopyTo(photo, TruthMask);
-        if (d > 0)
+        if (d > 0 || options.HolePunches)
         {
             var flap = new Vec3b(222, 226, 228);
             for (var y = 0; y < height; y++)

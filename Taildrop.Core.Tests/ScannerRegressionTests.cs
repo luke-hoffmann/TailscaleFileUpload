@@ -55,4 +55,28 @@ public class ScannerRegressionTests
         _output.WriteLine($"folded corner brightness {brightness:F0}");
         Assert.True(brightness > 150, $"the folded-away corner is filled with paper colour ({brightness:F0})");
     }
+
+    [Fact]
+    public void HolePunches_AreFilled()
+    {
+        // Three binder holes with the dark table showing through come out as paper; nothing else changes.
+        using var scene = new SyntheticScene(new SceneOptions { Backdrop = Backdrop.DarkWood, HolePunches = true, Lighting = false });
+        var outline = ScanPipeline.Detect(scene.Photo);
+        var render = ScanPipeline.Render(scene.Photo, outline, ScanFilter.Original, 0);
+        using var page = Cv2.ImDecode(render.Jpeg, ImreadModes.Color);
+        foreach (var fy in new[] { 0.2, 0.5, 0.8 })
+        {
+            var cx = (int)(page.Width * 10 / scene.Options.PageMmWidth);
+            var cy = (int)(page.Height * fy);
+            var r = (int)(page.Width * 2.0 / scene.Options.PageMmWidth);
+            using var hole = new Mat(page, new Rect(cx - r, cy - r, 2 * r, 2 * r));
+            var mean = Cv2.Mean(hole);
+            var brightness = (mean.Val0 + mean.Val1 + mean.Val2) / 3;
+            _output.WriteLine($"hole at {fy:P0}: brightness {brightness:F0}");
+            Assert.True(brightness > 150, $"hole at {fy:P0} is filled ({brightness:F0})");
+        }
+        // Detection is unaffected by the holes.
+        using var mask = PageAnalysis.OutlineMask(outline, scene.Options.Width, scene.Options.Height);
+        Assert.True(PageAnalysis.Iou(mask, scene.TruthMask) > 0.97);
+    }
 }
