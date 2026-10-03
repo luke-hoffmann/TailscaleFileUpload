@@ -64,6 +64,7 @@ public static class ScanPipeline
     public static ScanRender Render(Mat image, ScanOutline outline, ScanFilter filter, int rotateClockwise)
     {
         using var flat = PageFlattener.Flatten(image, outline);
+        EdgeCleaner.Clean(image, outline, flat);
         using var enhanced = ScanEnhancer.Apply(flat, filter);
         using var rotated = Rotate(enhanced, rotateClockwise);
 

@@ -23,10 +23,13 @@
   <ItemGroup>
     <!-- Phone-facing web page. Flat folder; resources are named "Assets.<file>" so lookups stay predictable. -->
     <EmbeddedResource Include="Assets\*.*" LogicalName="Assets.%(Filename)%(Extension)" />
+    <!-- Page ranker trained by tools/ScanBench/train_ranker.py. -->
+    <EmbeddedResource Include="Scanning\page_ranker.json" LogicalName="Taildrop.Core.Scanning.page_ranker.json" Condition="Exists('Scanning\page_ranker.json')" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Taildrop.Core.Tests" />
+    <InternalsVisibleTo Include="ScanBench" />
   </ItemGroup>
 
 </Project>

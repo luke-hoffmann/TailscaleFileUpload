@@ -3,20 +3,23 @@ using OpenCvSharp;
 namespace Taildrop.Core.Scanning;
 
 /// <summary>
-/// Finds the page in a photo: the whole outline (not just four corner points), so curled receipts,
-/// folded sheets and dog-eared corners are captured completely. Several independent ways of
-/// segmenting the paper (strong edges, weak edges, bright pixels, neutral-colored pixels) each propose an
-/// outline; the best-scoring plausible one wins. (A GrabCut refinement was tried and removed: it was
-/// non-deterministic and clipped colored corners.)
+/// Finds the page in a photo. Page quadrilaterals are proposed from straight lines in the photo, from paper-like
+/// regions (strong edges, weak edges, bright pixels, neutral-colored pixels) and from the best of those with a side
+/// moved out to a fainter edge, all scored by <see cref="QuadFinder"/>. <see cref="PageRanker"/>, trained on photos
+/// with known pages, picks the whole sheet among them (not a panel of a fold, a block of print, or a packet's other
+/// sheets); its real, possibly curved, edges are then traced by <see cref="EdgeTracer"/>.
+/// (A GrabCut refinement was tried and removed: it was non-deterministic and clipped colored corners.)
 /// </summary>
 public static class DocumentDetector
 {
-    const int WorkEdge = 1000;
-    const double MinConfidence = 0.58;
+    internal const int WorkEdge = 1000;
+    const double MinConfidence = 0.55;
     /// <summary>A narrow receipt in a landscape frame can be only a few percent of the photo.</summary>
     const double MinAreaRatio = 0.025;
     /// <summary>Below this a "page" is a guess; the full frame is a more honest starting point for manual adjustment.</summary>
-    const double MinAcceptedScore = 0.4;
+    const double MinAcceptedScore = 0.35;
+    /// <summary>With the trained ranker the score is the predicted overlap with the real page.</summary>
+    internal static double MinPredictedOverlap = 0.3, ConfidentOverlap = 0.6;
 
     public static ScanOutline Detect(Mat image)
     {
@@ -25,24 +28,110 @@ public static class DocumentDetector
         if (scale < 1) Cv2.Resize(image, small, new Size(), scale, scale, InterpolationFlags.Area);
         else image.CopyTo(small);
 
-        using var context = new Analysis(small);
-        var best = FindBestCandidate(context);
-        if (best is null) return ScanOutline.FullFrame();
+        var best = FindPage(small);
+        var ranked = best?.Source.EndsWith("ranked") == true;
+        if (best is null || best.Score < (ranked ? MinPredictedOverlap : MinAcceptedScore)) return ScanOutline.FullFrame();
+        var corners = best.Corners.Select(c => new Point2d(c.X / scale, c.Y / scale)).ToArray();
+        return EdgeTracer.Trace(image, corners, best.Score >= (ranked ? ConfidentOverlap : MinConfidence));
+    }
 
-        var outline = BuildOutline(best.Contour, small.Size());
-        if (outline is null) return ScanOutline.FullFrame();
-        outline.Confident = best.Score >= MinConfidence;
-        return outline;
+    /// <summary>Best page quadrilateral (working-image pixels, TL TR BR BL) among all hypotheses.</summary>
+    internal static QuadFinder.Quad? FindPage(Mat small)
+    {
+        using var evidence = new QuadFinder.Evidence(small);
+        var scored = Candidates(small, evidence);
+        if (scored.Count == 0) return null;
+        if (!UseRanker || !PageRanker.Available) return QuadFinder.WholeSheet(evidence, scored);
+        var features = PageRanker.Features(evidence, scored);
+        QuadFinder.Quad? best = null;
+        for (var i = 0; i < scored.Count; i++)
+        {
+            var predicted = PageRanker.Predict(features[i]);
+            if (best is null || predicted > best.Score) best = scored[i] with { Score = predicted, Source = scored[i].Source + "+ranked" };
+        }
+        return best;
+    }
+
+    /// <summary>For the benchmark: pick with the hand-tuned rules instead of the trained ranker.</summary>
+    internal static bool UseRanker = true;
+    internal static int Shortlist = 40;
+
+    /// <summary>All page hypotheses worth a full score, best first.</summary>
+    internal static List<QuadFinder.Quad> Candidates(Mat small, QuadFinder.Evidence evidence)
+    {
+        using var context = new Analysis(small);
+
+        var hypotheses = new List<(Point2d[] Corners, string Source)>();
+        foreach (var (name, mask) in new[] { ("edges", EdgeMask(context)), ("weak-edges", WeakEdgeMask(context)), ("bright", BrightMask(context)), ("neutral", NeutralMask(context)) })
+        {
+            using (mask)
+            {
+                Cv2.FindContours(mask, out var contours, out _, RetrievalModes.External, ContourApproximationModes.ApproxNone);
+                foreach (var contour in contours.OrderByDescending(c => Cv2.ContourArea(c)).Take(3))
+                {
+                    if (Cv2.ContourArea(contour) < MinAreaRatio * context.FrameArea) continue;
+                    var quad = RegionQuad(contour);
+                    if (quad is not null) hypotheses.Add((quad, name));
+                }
+            }
+        }
+        foreach (var quad in QuadFinder.LineHypotheses(small, evidence)) hypotheses.Add((quad, "lines"));
+        if (hypotheses.Count == 0) return new();
+
+        // Cheap perimeter score for everything, full score (with the inside of the page) for the best few.
+        // Region outlines always get the full score: they are few, and on folded paper they are often the only
+        // hypotheses that span the whole sheet.
+        var shortlist = hypotheses
+            .Select(h => (h.Corners, h.Source, Quick: QuadFinder.Score(evidence, h.Corners, withInterior: false).Total))
+            .Where(h => h.Quick > 0)
+            .OrderByDescending(h => h.Quick)
+            .Select((h, rank) => (h, rank))
+            .Where(x => x.rank < Shortlist || x.h.Source != "lines")
+            .Select(x => x.h)
+            .ToList();
+        var scored = shortlist
+            .Select(h => new QuadFinder.Quad(OrderCorners(h.Corners), QuadFinder.Score(evidence, h.Corners).Total, h.Source))
+            .OrderByDescending(q => q.Score)
+            .ToList();
+        // A faint real edge (white paper on a white desk) loses to a line of print just inside it: offer the best
+        // outlines again with each side moved out to the next edge beyond it.
+        var extended = new List<QuadFinder.Quad>();
+        foreach (var q in scored.Take(ExtendTop))
+            for (var side = 0; side < 4; side++)
+            {
+                foreach (var corners in QuadFinder.ExtendSide(evidence, q.Corners, side))
+                    extended.Add(new QuadFinder.Quad(OrderCorners(corners), QuadFinder.Score(evidence, corners).Total, q.Source + "+extended"));
+            }
+        return scored.Concat(extended).OrderByDescending(q => q.Score).ToList();
+    }
+
+    internal static int ExtendTop = 6;
+
+    /// <summary>Quadrilateral for a region outline: rough corners from the hull, then straight-line corners.</summary>
+    static Point2d[]? RegionQuad(Point[] contour)
+    {
+        var points = contour.Select(p => new Point2d(p.X, p.Y)).ToList();
+        if (points.Count < 12) return null;
+        if (Geometry.SignedArea(points) < 0) points.Reverse(); // clockwise on screen
+        var hull = Cv2.ConvexHull(contour);
+        var rough = QuadFit.Fit(hull);
+        if (rough is null) return null;
+        var centre = new Point2d(points.Average(p => p.X), points.Average(p => p.Y));
+        var ordered = OrderCorners(rough.Select(p => new Point2d(p.X, p.Y)).ToArray());
+        return QuadFinder.LineCorners(points, ordered) ?? ordered;
+    }
+
+    /// <summary>For diagnostics in tests: the winning hypothesis.</summary>
+    internal static string Describe(Mat image)
+    {
+        var scale = Math.Min(1.0, WorkEdge / (double)Math.Max(image.Width, image.Height));
+        using var small = new Mat();
+        Cv2.Resize(image, small, new Size(), scale, scale, InterpolationFlags.Area);
+        var best = FindPage(small);
+        return best is null ? "no page" : $"{best.Source} score {best.Score:F2}";
     }
 
     // ---- candidate generation -------------------------------------------------------------------------------
-
-    sealed class Candidate
-    {
-        public required Point[] Contour { get; init; }
-        public double Score { get; init; }
-        public string Source { get; init; } = "";
-    }
 
     /// <summary>Per-photo data shared by all the candidate generators and the scorer.</summary>
     sealed class Analysis : IDisposable
@@ -78,16 +167,6 @@ public static class DocumentDetector
             Blurred.Dispose();
             Gradient.Dispose();
         }
-    }
-
-    static Candidate? FindBestCandidate(Analysis a)
-    {
-        var candidates = new List<Candidate>();
-        AddFromMask(a, EdgeMask(a), "edges", candidates, useHull: false);
-        AddFromMask(a, WeakEdgeMask(a), "weak-edges", candidates, useHull: false);
-        AddFromMask(a, BrightMask(a), "bright", candidates, useHull: false);
-        AddFromMask(a, NeutralMask(a), "neutral", candidates, useHull: false);
-        return candidates.Where(c => c.Score >= MinAcceptedScore).OrderByDescending(c => c.Score).FirstOrDefault();
     }
 
     /// <summary>Closed regions bounded by strong edges, after erasing thin dark print so text does not break them up.</summary>
@@ -184,220 +263,13 @@ public static class DocumentDetector
         return filled;
     }
 
-    static void AddFromMask(Analysis a, Mat mask, string source, List<Candidate> candidates, bool useHull)
-    {
-        using (mask)
-        {
-            Cv2.FindContours(mask, out var contours, out _, RetrievalModes.External, ContourApproximationModes.ApproxNone);
-            foreach (var contour in contours.OrderByDescending(c => Cv2.ContourArea(c)).Take(3))
-            {
-                if (Cv2.ContourArea(contour) < MinAreaRatio * a.FrameArea) continue;
-                var polygon = useHull ? Cv2.ConvexHull(contour) : contour;
-                var score = Score(a, polygon);
-                candidates.Add(new Candidate { Contour = polygon, Score = score, Source = source });
-            }
-        }
-    }
-
-    // ---- scoring --------------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// How much this outline looks like a sheet of paper in a photo, 0-1: a clear boundary along the whole
-    /// contour, close to a rectangle, sensible corner angles, a substantial but not frame-filling size, and
-    /// not hugging the picture border (that would be the backdrop, not the page).
-    /// </summary>
-    static ScoreBreakdown ScoreDetails(Analysis a, Point[] polygon)
-    {
-        var area = Cv2.ContourArea(polygon);
-        var areaRatio = area / a.FrameArea;
-        if (areaRatio < MinAreaRatio || areaRatio > 0.985) return default;
-
-        var hull = Cv2.ConvexHull(polygon);
-        var hullArea = Cv2.ContourArea(hull);
-        var solidity = hullArea > 0 ? area / hullArea : 0;
-
-        var quad = QuadFit.Fit(hull);
-        if (quad is null) return default;
-        var quadArea = Math.Abs(Geometry.SignedArea(quad.Select(p => new Point2d(p.X, p.Y)).ToArray()));
-        if (quadArea < 1) return default;
-
-        var rectangularity = Math.Clamp(1 - Math.Abs(area / quadArea - 1) * 3, 0, 1);
-
-        var angleScore = 1.0;
-        for (var i = 0; i < 4; i++)
-        {
-            var angle = CornerAngle(quad[(i + 3) % 4], quad[i], quad[(i + 1) % 4]);
-            var off = Math.Max(0, Math.Max(55 - angle, angle - 125));
-            angleScore = Math.Min(angleScore, Math.Clamp(1 - off / 25, 0, 1));
-        }
-
-        // Boundary strength and border contact, sampled along the contour.
-        double support = 0;
-        var onBorder = 0;
-        var step = Math.Max(1, polygon.Length / 400);
-        var samples = 0;
-        for (var i = 0; i < polygon.Length; i += step)
-        {
-            var p = polygon[i];
-            support += a.Gradient.At<float>(Math.Clamp(p.Y, 0, a.Size.Height - 1), Math.Clamp(p.X, 0, a.Size.Width - 1));
-            if (p.X <= 3 || p.Y <= 3 || p.X >= a.Size.Width - 4 || p.Y >= a.Size.Height - 4) onBorder++;
-            samples++;
-        }
-        var edgeSupport = Math.Clamp(support / samples / 22.0, 0, 1);
-        var borderShare = onBorder / (double)samples;
-
-        var sizeScore = Math.Clamp((areaRatio - MinAreaRatio) / 0.3, 0, 1) * (areaRatio > 0.93 ? 0.4 : 1);
-        var solidityScore = Math.Clamp((solidity - 0.7) / 0.22, 0, 1);
-
-        var m = Cv2.Moments(polygon);
-        double centerScore = 0;
-        if (m.M00 > 0)
-        {
-            var dx = (m.M10 / m.M00 - a.Size.Width / 2.0) / a.Size.Width;
-            var dy = (m.M01 / m.M00 - a.Size.Height / 2.0) / a.Size.Height;
-            centerScore = Math.Clamp(1 - 1.4 * Math.Sqrt(dx * dx + dy * dy), 0, 1);
-        }
-
-        var total = 0.30 * edgeSupport + 0.20 * rectangularity + 0.15 * angleScore + 0.15 * sizeScore + 0.10 * solidityScore + 0.10 * centerScore;
-        total *= 1 - Math.Min(0.7, borderShare * 1.5);
-        return new ScoreBreakdown(total, edgeSupport, rectangularity, angleScore, sizeScore, solidityScore, centerScore, borderShare);
-    }
-
-    static double Score(Analysis a, Point[] polygon) => ScoreDetails(a, polygon).Total;
-
-    readonly record struct ScoreBreakdown(double Total, double Edge, double Rect, double Angle, double Size, double Solidity, double Center, double Border);
-
-    /// <summary>For diagnostics in tests.</summary>
-    internal static string Describe(Mat image)
-    {
-        var scale = Math.Min(1.0, WorkEdge / (double)Math.Max(image.Width, image.Height));
-        using var small = new Mat();
-        Cv2.Resize(image, small, new Size(), scale, scale, InterpolationFlags.Area);
-        using var a = new Analysis(small);
-        var lines = new List<string>();
-        foreach (var (name, mask) in new[] { ("edges", EdgeMask(a)), ("weak", WeakEdgeMask(a)), ("bright", BrightMask(a)), ("neutral", NeutralMask(a)) })
-        {
-            using (mask)
-            {
-                Cv2.FindContours(mask, out var contours, out _, RetrievalModes.External, ContourApproximationModes.ApproxNone);
-                foreach (var c in contours.OrderByDescending(c => Cv2.ContourArea(c)).Take(2))
-                {
-                    var s = ScoreDetails(a, c);
-                    lines.Add($"{name}: area {Cv2.ContourArea(c) / a.FrameArea:P0} score {s.Total:F2} edge {s.Edge:F2} rect {s.Rect:F2} angle {s.Angle:F2} size {s.Size:F2} sol {s.Solidity:F2} ctr {s.Center:F2} border {s.Border:F2}");
-                }
-            }
-        }
-        return string.Join("\n", lines);
-    }
-
-    static double CornerAngle(Point previous, Point corner, Point next)
-    {
-        double ax = previous.X - corner.X, ay = previous.Y - corner.Y;
-        double bx = next.X - corner.X, by = next.Y - corner.Y;
-        var cos = (ax * bx + ay * by) / (Math.Sqrt(ax * ax + ay * ay) * Math.Sqrt(bx * bx + by * by) + 1e-9);
-        return Math.Acos(Math.Clamp(cos, -1, 1)) * 180 / Math.PI;
-    }
-
-    // ---- outline construction -------------------------------------------------------------------------------
-
-    /// <summary>Corners from the contour's hull, then the contour itself split into four edge runs between them.</summary>
-    static ScanOutline? BuildOutline(Point[] contour, Size size)
-    {
-        var points = contour.Select(p => new Point2d(p.X, p.Y)).ToList();
-        if (points.Count < 8) return null;
-        if (Geometry.SignedArea(points) < 0) points.Reverse(); // clockwise on screen
-
-        var hull = Cv2.ConvexHull(points.Select(p => new Point((int)p.X, (int)p.Y)).ToArray());
-        var quad = QuadFit.Fit(hull);
-        if (quad is null) return null;
-
-        var centre = new Point2d(points.Average(p => p.X), points.Average(p => p.Y));
-        var corners = SnapOutward(quad.Select(p => new Point2d(p.X, p.Y)).ToArray(), points, centre);
-        corners = OrderCorners(corners, centre);
-
-        // Contour index nearest to each corner (clockwise order TL, TR, BR, BL).
-        var indices = corners.Select(c => NearestIndex(points, c)).ToArray();
-        for (var i = 0; i < 4; i++) if (indices[i] == indices[(i + 1) % 4]) return null;
-
-        Point2d[] Run(int from, int to)
-        {
-            var run = new List<Point2d>();
-            for (var i = from; ; i = (i + 1) % points.Count)
-            {
-                run.Add(points[i]);
-                if (i == to) break;
-            }
-            return run.ToArray();
-        }
-
-        var top = Prepare(Run(indices[0], indices[1]), corners[0], corners[1]);
-        var right = Prepare(Run(indices[1], indices[2]), corners[1], corners[2]);
-        var bottom = Prepare(Run(indices[2], indices[3]), corners[2], corners[3]).Reverse().ToArray(); // BR->BL becomes BL->BR
-        var left = Prepare(Run(indices[3], indices[0]), corners[3], corners[0]).Reverse().ToArray();    // BL->TL becomes TL->BL
-
-        double[] N(Point2d p) => new[] { p.X / size.Width, p.Y / size.Height };
-        return new ScanOutline
-        {
-            Corners = corners.Select(N).ToArray(),
-            Top = top.Select(N).ToArray(),
-            Right = right.Select(N).ToArray(),
-            Bottom = bottom.Select(N).ToArray(),
-            Left = left.Select(N).ToArray()
-        };
-    }
-
-    /// <summary>Resamples an edge run, pins its ends to the corners, smooths it, and straightens it when it is only noise.</summary>
-    static Point2d[] Prepare(Point2d[] run, Point2d start, Point2d end)
-    {
-        var samples = Geometry.ResampleByArcLength(run, ScanOutline.EdgeSamples);
-        samples[0] = start;
-        samples[^1] = end;
-        Geometry.SmoothInPlace(samples, 3);
-
-        // Within ~0.7% of the edge length of a straight line is noise from the segmentation, not a bend.
-        var chord = Geometry.Distance(start, end);
-        if (Geometry.MaxDeviationFromChord(samples) < 0.007 * chord)
-        {
-            for (var i = 0; i < samples.Length; i++)
-            {
-                var t = i / (double)(samples.Length - 1);
-                samples[i] = new Point2d(start.X + (end.X - start.X) * t, start.Y + (end.Y - start.Y) * t);
-            }
-        }
-        return samples;
-    }
-
-    /// <summary>Moves each corner to the contour point that sticks out furthest in its direction, so rounded or noisy corners lose nothing.</summary>
-    static Point2d[] SnapOutward(Point2d[] corners, List<Point2d> contour, Point2d centre)
-    {
-        var diagonal = Math.Sqrt(
-            Math.Pow(corners.Max(c => c.X) - corners.Min(c => c.X), 2) + Math.Pow(corners.Max(c => c.Y) - corners.Min(c => c.Y), 2));
-        var radius = 0.08 * diagonal;
-        var snapped = new Point2d[4];
-        for (var i = 0; i < 4; i++)
-        {
-            var direction = new Point2d(corners[i].X - centre.X, corners[i].Y - centre.Y);
-            var length = Math.Sqrt(direction.X * direction.X + direction.Y * direction.Y);
-            direction = new Point2d(direction.X / Math.Max(length, 1e-9), direction.Y / Math.Max(length, 1e-9));
-            var best = corners[i];
-            var bestReach = double.NegativeInfinity;
-            foreach (var p in contour)
-            {
-                if (Geometry.Distance(p, corners[i]) > radius) continue;
-                var reach = (p.X - centre.X) * direction.X + (p.Y - centre.Y) * direction.Y;
-                if (reach > bestReach) { bestReach = reach; best = p; }
-            }
-            snapped[i] = best;
-        }
-        return snapped;
-    }
-
     /// <summary>
     /// Orders four corners clockwise as TL, TR, BR, BL. "Top" is the edge that points most to the right when
     /// walking clockwise, i.e. the page is upright as the photo shows it.
     /// </summary>
-    static Point2d[] OrderCorners(Point2d[] corners, Point2d centre)
+    internal static Point2d[] OrderCorners(Point2d[] corners)
     {
+        var centre = new Point2d(corners.Average(c => c.X), corners.Average(c => c.Y));
         var clockwise = corners.OrderBy(c => Math.Atan2(c.Y - centre.Y, c.X - centre.X)).ToArray();
         var bestStart = 0;
         var bestScore = double.NegativeInfinity;
@@ -410,18 +282,6 @@ public static class DocumentDetector
             if (score > bestScore) { bestScore = score; bestStart = i; }
         }
         return Enumerable.Range(0, 4).Select(i => clockwise[(bestStart + i) % 4]).ToArray();
-    }
-
-    static int NearestIndex(List<Point2d> points, Point2d target)
-    {
-        var best = 0;
-        var bestDistance = double.MaxValue;
-        for (var i = 0; i < points.Count; i++)
-        {
-            var d = Geometry.Distance(points[i], target);
-            if (d < bestDistance) { bestDistance = d; best = i; }
-        }
-        return best;
     }
 }
 

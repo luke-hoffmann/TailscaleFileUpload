@@ -33,6 +33,26 @@ public class DetectorSurvey
             ("steep", new SceneOptions { TiltDeg = 38, YawDeg = -20, RollDeg = -10 }),
             ("big-12MP", new SceneOptions { Width = 4032, Height = 3024, TiltDeg = 18, YawDeg = 9, RollDeg = 4, PillowXPx = 40, Backdrop = Backdrop.TanWood }),
         };
+        // SCENE_EXPORT=<dir> [SCENE_SEEDS=n]: write the scenes (photo, truth mask, corners) for tools/ScanBench.
+        var export = Environment.GetEnvironmentVariable("SCENE_EXPORT");
+        if (export is not null)
+        {
+            var seeds = int.Parse(Environment.GetEnvironmentVariable("SCENE_SEEDS") ?? "1");
+            var seed0 = int.Parse(Environment.GetEnvironmentVariable("SCENE_SEED0") ?? "7");
+            foreach (var (name, options) in scenes)
+            for (var k = 0; k < seeds; k++)
+            {
+                options.Seed = seed0 + k;
+                using var scene = new SyntheticScene(options);
+                var dir = Path.Combine(export, $"{name}-{options.Seed}");
+                Directory.CreateDirectory(dir);
+                Cv2.ImWrite(Path.Combine(dir, "photo.jpg"), scene.Photo, new ImageEncodingParam(ImwriteFlags.JpegQuality, 92));
+                Cv2.ImWrite(Path.Combine(dir, "mask.png"), scene.TruthMask);
+                var corners = scene.TruthOutline.Corners.Select(c => new[] { c[0] * options.Width, c[1] * options.Height });
+                File.WriteAllText(Path.Combine(dir, "meta.json"), System.Text.Json.JsonSerializer.Serialize(new { family = "scene-" + name, corners_actual = corners, corners_virtual = corners }));
+            }
+            return;
+        }
         foreach (var (name, options) in scenes)
         {
             using var scene = new SyntheticScene(options);

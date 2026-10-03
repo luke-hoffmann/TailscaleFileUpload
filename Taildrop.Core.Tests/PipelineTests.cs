@@ -164,12 +164,27 @@ public class PipelineTests
     }
 
     [Fact]
-    public void LowContrastPage_FallsBackToManualAdjustment()
+    public void LowContrastPage_IsStillFound()
     {
+        // White paper on a white desk: the page edge is faint, but it is the page that gets scanned.
         using var scene = new SyntheticScene(new SceneOptions { Backdrop = Backdrop.WhiteDesk });
         var outline = ScanPipeline.Detect(scene.Photo);
-        Assert.False(outline.Confident); // the phone opens the corner editor instead of guessing
+        using var mask = PageAnalysis.OutlineMask(outline, scene.Options.Width, scene.Options.Height);
+        Assert.True(PageAnalysis.Iou(mask, scene.TruthMask) > 0.95);
         var render = ScanPipeline.Render(scene.Photo, outline, ScanFilter.Auto, 0);
+        Assert.True(render.Jpeg.Length > 1000);
+    }
+
+    [Fact]
+    public void NoPage_FallsBackToManualAdjustment()
+    {
+        // Nothing but a textured table: the phone opens the corner editor instead of guessing.
+        using var scene = new SyntheticScene(new SceneOptions { Backdrop = Backdrop.Granite });
+        using var table = new Mat();
+        Cv2.Resize(new Mat(scene.Photo, new Rect(0, 0, scene.Photo.Width / 6, scene.Photo.Height / 6)), table, scene.Photo.Size(), 0, 0, InterpolationFlags.Cubic);
+        var outline = ScanPipeline.Detect(table);
+        Assert.False(outline.Confident);
+        var render = ScanPipeline.Render(table, outline, ScanFilter.Auto, 0);
         Assert.True(render.Jpeg.Length > 1000);
     }
 

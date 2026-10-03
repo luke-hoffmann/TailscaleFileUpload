@@ -25,16 +25,42 @@ window stops the receiver and permanently deletes the inbox.
   paper, removes perspective, evens out the lighting and saves the finished page. That is why it is fast, sharp and
   needs nothing installed on the phone.
 - It follows the **whole outline** of the paper, not just four corners, so curled receipts, folded sheets and
-  dog-eared corners come out complete and rectangular. Page proportions (A4, Letter, receipts) are recovered from
-  the perspective, and output is never upscaled.
+  dog-eared corners come out complete and rectangular. A folded-over corner is unfolded to where the corner would
+  be, and anything inside the page that isn't paper (the table showing where a corner is folded away, a sliver
+  of desk at an edge) is filled with the paper's own color. Page proportions (A4, Letter, receipts) are recovered
+  from the perspective, and output is never upscaled.
+- Only the one sheet is scanned: other sheets of a packet, a folded-back tab against a corner, or a magazine next
+  to the page are left out.
 - After a scan you can switch the look (**Auto**, **Gray**, **B&W**, **Original**), **Rotate**, **Retake**, or
   **Adjust** the edges: drag the corners, or pull an edge to follow a bend. The same inbox file is replaced in place.
-  If the page can't be found with confidence (for example white paper on a white desk), the edge editor opens
-  by itself.
+  If the page can't be found with confidence (for example a sheet buried under pens and other papers), the edge
+  editor opens by itself.
 - **Scan Next Page** keeps going; each page is its own JPEG, named `Scan 2026-10-02 at 14.31.05.jpg`.
 - Photos taken from the page's camera button are not added to your photo library.
 
 Tips for the best result: good light, the whole page in the frame, any contrasting surface behind it.
+
+### How well it works
+
+Measured with `tools/ScanBench` (see its README): 352 synthetic 12 MP photos of real document pages on 3D
+paper with exact ground truth, 44 photos of a page with a packet's folded-back sheet against a corner, and
+2,142 real phone video frames from the SmartDoc 2015 benchmark. IoU is the outline's overlap with the true page
+(1.0 = perfect). "Missing" is paper left out; MS-SSIM compares the scan with the perfect flat page (higher is
+better).
+
+| | before | now |
+|---|---|---|
+| Synthetic: IoU / missing paper / MS-SSIM | 0.894 / 8.1% / 0.51 | **0.969 / 2.2% / 0.67** |
+| ... folded corner (dog-ear) | 0.932 | **0.988** |
+| ... half / tri-fold creases | 0.879 | **0.981** |
+| ... another sheet touching a corner | 0.803 | **0.990** |
+| ... crumpled | 0.971 | **0.990** |
+| Folded-back tab against a corner (IoU / foreign area) | n/a | **0.985 / 0.4%** |
+| SmartDoc real frames: IoU / frames within 0.9 IoU | 0.732 / 60% | **0.849 / 76%** |
+| ... white paper on a white desk | 0.355 | **0.704** |
+
+Still hard: a sheet on a cluttered desk under pens and cables with other papers beneath it (SmartDoc
+background 5), where the edge editor opens instead.
 
 ## Get the exe
 
@@ -73,11 +99,12 @@ used nor needed.
 
 | Folder | What it is |
 |---|---|
-| `Taildrop.Core/` | The receiver (Kestrel HTTP server), the phone page (`Assets/`, embedded into the exe) and the scanning engine (`Scanning/`: page detection, flattening, enhancement). Plain .NET 8, builds and tests on any OS. |
+| `Taildrop.Core/` | The receiver (Kestrel HTTP server), the phone page (`Assets/`, embedded into the exe) and the scanning engine (`Scanning/`: page detection with a trained page ranker, edge tracing, flattening, clean-up, enhancement). Plain .NET 8, builds and tests on any OS. |
 | `TaildropApp/` | The Windows desktop window (WinForms) that hosts the receiver. |
 | `Taildrop.Core.Tests/` | Unit and integration tests, including synthetic photos of tilted, bent and curled pages. |
 | `tools/DevHost/` | Runs the real receiver and phone page on a laptop of any OS, for development. |
 | `tools/e2e/` | Browser tests of the phone page in an iPhone-sized Chromium (Playwright). |
+| `tools/ScanBench/` | Scanner benchmark (synthetic 3D-paper photos, SmartDoc 2015) and the page-ranker training script. |
 
 ### Developing
 

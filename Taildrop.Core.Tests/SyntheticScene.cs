@@ -26,6 +26,12 @@ public sealed class SceneOptions
     public double PillowYPx;
     public bool Lighting = true;
     public int Seed = 7;
+    /// <summary>0-3: another (cream) sheet lies under that page corner (TL, TR, BR, BL) and runs off, like the
+    /// folded-back tab of a packet. -1: none.</summary>
+    public int TabCorner = -1;
+    /// <summary>Top-left corner folded over along a 45° line this many mm from the corner (0: none). The table shows
+    /// where the corner was; the blank back of the flap lies on the page.</summary>
+    public double DogEarMm;
 }
 
 /// <summary>
@@ -87,11 +93,14 @@ sealed class SyntheticScene : IDisposable
         var xs = new float[height][];
         var ys = new float[height][];
         var inside = new byte[height][];
+        var fold = new byte[height][];   // 1 = corner folded away (table shows), 2 = flap (back of the paper)
+        var d = options.DogEarMm * TexelsPerMm;
         Parallel.For(0, height, y =>
         {
             var rowX = new float[width];
             var rowY = new float[width];
             var rowInside = new byte[width];
+            var rowFold = new byte[width];
             for (var x = 0; x < width; x++)
             {
                 double px = x, py = y;
@@ -104,8 +113,13 @@ sealed class SyntheticScene : IDisposable
                 rowX[x] = (float)page.X;
                 rowY[x] = (float)page.Y;
                 rowInside[x] = page.X >= 0 && page.X <= PageTexelsWide && page.Y >= 0 && page.Y <= PageTexelsHigh ? (byte)255 : (byte)0;
+                if (d > 0 && rowInside[x] != 0)
+                {
+                    if (page.X + page.Y < d) rowFold[x] = 1;
+                    else if (page.X < d && page.Y < d) rowFold[x] = 2;   // mirror of the corner across the fold line
+                }
             }
-            xs[y] = rowX; ys[y] = rowY; inside[y] = rowInside;
+            xs[y] = rowX; ys[y] = rowY; inside[y] = rowInside; fold[y] = rowFold;
         });
         for (var y = 0; y < height; y++)
         {
@@ -117,8 +131,30 @@ sealed class SyntheticScene : IDisposable
         using var page2 = new Mat();
         Cv2.Remap(texture, page2, mapX, mapY, InterpolationFlags.Linear, BorderTypes.Replicate);
         using var backdrop = MakeBackdrop(width, height, options.Backdrop, rng);
+        if (options.TabCorner is >= 0 and < 4)
+        {
+            var (sx, sy) = new[] { (-1, -1), (1, -1), (1, 1), (-1, 1) }[options.TabCorner];
+            double tw = options.PageMmWidth * 0.85, th = options.PageMmHeight * 0.7;
+            var cxMm = sx * (options.PageMmWidth / 2 + tw / 2 - 0.3 * tw);
+            var cyMm = sy * (options.PageMmHeight / 2 + th / 2 - 0.3 * th);
+            var angle = 14 * Math.PI / 180 * sx;
+            var tab = new[] { (-tw / 2, -th / 2), (tw / 2, -th / 2), (tw / 2, th / 2), (-tw / 2, th / 2) }
+                .Select(c => Project(cxMm + c.Item1 * Math.Cos(angle) - c.Item2 * Math.Sin(angle), cyMm + c.Item1 * Math.Sin(angle) + c.Item2 * Math.Cos(angle), f, distance, options))
+                .Select(p => new Point((int)Math.Round(p.X), (int)Math.Round(p.Y))).ToArray();
+            Cv2.FillConvexPoly(backdrop, tab, new Scalar(205, 228, 240), LineTypes.AntiAlias);
+        }
         var photo = backdrop.Clone();
         page2.CopyTo(photo, TruthMask);
+        if (d > 0)
+        {
+            var flap = new Vec3b(222, 226, 228);
+            for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+            {
+                if (fold[y][x] == 1) photo.Set(y, x, backdrop.At<Vec3b>(y, x));
+                else if (fold[y][x] == 2) photo.Set(y, x, flap);
+            }
+        }
 
         if (options.Lighting) ApplyLighting(photo, rng);
         Cv2.GaussianBlur(photo, photo, new Size(3, 3), 0.8);
