@@ -243,6 +243,22 @@ public class LiveTests : IClassFixture<ServerFixture>
             await Assert.ThrowsAnyAsync<WebSocketException>(() => foreign.ConnectAsync(LiveUri, CancellationToken.None));
         }
 
+        // The published address (behind tailscale serve) is this server's page too, whatever Host the proxy sends.
+        _f.Server.PublicUrl = "https://box.tail1234.ts.net:8443/";
+        try
+        {
+            using (var published = await ConnectAsync("https://box.tail1234.ts.net:8443")) Assert.Equal(WebSocketState.Open, published.State);
+            using var otherPort = new ClientWebSocket();
+            otherPort.Options.SetRequestHeader("Origin", "https://box.tail1234.ts.net");
+            await Assert.ThrowsAnyAsync<WebSocketException>(() => otherPort.ConnectAsync(LiveUri, CancellationToken.None));
+            var csp = (await _f.Http.GetAsync("/")).Headers.GetValues("Content-Security-Policy").Single();
+            Assert.Contains("wss://box.tail1234.ts.net:8443", csp);
+        }
+        finally
+        {
+            _f.Server.PublicUrl = null;
+        }
+
         // Plain HTTP on the endpoint is refused too.
         Assert.Equal(HttpStatusCode.BadRequest, (await _f.Http.GetAsync("/api/live")).StatusCode);
     }

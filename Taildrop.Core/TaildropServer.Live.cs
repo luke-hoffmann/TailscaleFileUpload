@@ -366,14 +366,17 @@ public sealed partial class TaildropServer
     // ---- WebSocket plumbing ---------------------------------------------------------------------------------------
 
     /// <summary>
-    /// The page that opened the socket must be this server's own page. Behind tailscale serve the Host header is the
-    /// tailnet name (and X-Forwarded-Host carries it too); non-browser clients send no Origin and can't be tricked.
+    /// The page that opened the socket must be this server's own page: same host as the request, or the published
+    /// address (<see cref="PublicUrl"/>, behind tailscale serve). Non-browser clients send no Origin and can't be tricked.
     /// </summary>
-    static bool OriginAllowed(HttpRequest request)
+    bool OriginAllowed(HttpRequest request)
     {
         var origin = request.Headers.Origin.ToString();
         if (origin.Length == 0) return true;
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) return false;
+        if (PublicUrl is not null && Uri.TryCreate(PublicUrl, UriKind.Absolute, out var published)
+            && string.Equals(published.Host, uri.Host, StringComparison.OrdinalIgnoreCase) && published.Port == uri.Port && published.Scheme == uri.Scheme)
+            return true;
         foreach (var host in new[] { request.Headers.Host.ToString(), request.Headers["X-Forwarded-Host"].ToString() })
         {
             if (host.Length == 0) continue;

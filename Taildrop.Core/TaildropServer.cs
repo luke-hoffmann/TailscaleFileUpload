@@ -64,6 +64,12 @@ public sealed partial class TaildropServer : IAsyncDisposable
     /// <summary>The port the server listens on (useful after starting on port 0, "any free port").</summary>
     public int Port { get; private set; }
 
+    /// <summary>
+    /// The address phones open when it differs from where the server listens: behind <c>tailscale serve</c>,
+    /// https://computer.tail1234.ts.net/. Pages from there may open the live scanner's WebSocket.
+    /// </summary>
+    public string? PublicUrl { get; set; }
+
     public async Task StopAsync()
     {
         if (_app is null) return;
@@ -302,14 +308,14 @@ public sealed partial class TaildropServer : IAsyncDisposable
 
     static readonly Regex HostPattern = new(@"^[A-Za-z0-9.\-]+(:\d{1,5})?$", RegexOptions.Compiled);
 
-    static void SetSecurityHeaders(HttpRequest req, HttpResponse res)
+    void SetSecurityHeaders(HttpRequest req, HttpResponse res)
     {
         res.Headers["X-Content-Type-Options"] = "nosniff";
         res.Headers["X-Frame-Options"] = "DENY";
         res.Headers["Referrer-Policy"] = "no-referrer";
         // The live scanner's WebSocket is same-host, but older Safari doesn't count ws:/wss: as 'self'; name it.
-        var host = req.Headers.Host.ToString();
-        var socket = HostPattern.IsMatch(host) ? $" ws://{host} wss://{host}" : "";
+        var hosts = new[] { req.Headers.Host.ToString(), PublicUrl is { } url && Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Authority : "" };
+        var socket = string.Concat(hosts.Where(host => HostPattern.IsMatch(host)).Distinct().Select(host => $" ws://{host} wss://{host}"));
         res.Headers["Content-Security-Policy"] = $"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'{socket}; media-src 'self' blob:";
         // The camera is for this page only (it is off for any other origin by default; say so explicitly).
         res.Headers["Permissions-Policy"] = "camera=(self), microphone=()";

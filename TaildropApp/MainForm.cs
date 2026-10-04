@@ -56,6 +56,8 @@ sealed partial class MainForm : Form
     HashSet<string> _knownNames = new(StringComparer.OrdinalIgnoreCase);
 
     TaildropServer? _server;
+    TailscaleServe? _serve;
+    CancellationTokenSource? _warmUp;
     Process? _cleanupProcess;
     Bitmap? _qrBitmap;
     string? _taildropUrl;
@@ -423,18 +425,32 @@ sealed partial class MainForm : Form
             SetStartingState();
             await StopTaildropAsync();
 
-            var tailscaleIp = await Task.Run(GetTailscaleIPv4);
+            var tailscale = Tailscale.FindExecutable();
+            var status = tailscale is null ? null : await Tailscale.GetStatusAsync(tailscale);
+            var tailscaleIp = status?.IPv4 ?? await Task.Run(GetTailscaleIPv4);
             if (tailscaleIp is null)
             {
                 SetErrorState("Connect Tailscale on this computer, then click Try again.");
                 return;
             }
 
-            _taildropUrl = $"http://{tailscaleIp}:{Port}";
+            // With HTTPS on in the tailnet, the receiver listens on this computer only and `tailscale serve` publishes
+            // it at https://<this computer>.ts.net: the phone's live camera needs a secure page. Otherwise it listens
+            // on the Tailscale address over plain HTTP, as before, and the phone takes photos instead.
             try
             {
-                _server = new TaildropServer(_inboxPath!);
-                await _server.StartAsync(IPAddress.Parse(tailscaleIp), Port);
+                if (tailscale is not null && status is { HttpsEnabled: true, DnsName: { } dnsName })
+                {
+                    _server = new TaildropServer(_inboxPath!);
+                    await _server.StartAsync(IPAddress.Loopback, 0);
+                    _serve = await TailscaleServe.StartAsync(tailscale, dnsName, _server.Port);
+                    if (_serve is null) await StopTaildropAsync();
+                }
+                if (_serve is null)
+                {
+                    _server = new TaildropServer(_inboxPath!);
+                    await _server.StartAsync(IPAddress.Parse(tailscaleIp), Port);
+                }
                 if (_cleanupProcess is null) StartCleanupWatcher(Environment.ProcessId);
             }
             catch (Exception ex)
@@ -446,7 +462,32 @@ sealed partial class MainForm : Form
                 return;
             }
 
-            SetReadyState(_taildropUrl);
+            if (_serve is { } serve)
+            {
+                _taildropUrl = serve.Url;
+                _server!.PublicUrl = serve.Url;
+                serve.Stopped += () =>
+                {
+                    if (IsDisposed || !IsHandleCreated || _cleanupStarted) return;
+                    try
+                    {
+                        BeginInvoke(async () =>
+                        {
+                            if (_serve != serve || _cleanupStarted) return;
+                            await StopTaildropAsync();
+                            SetErrorState("The secure Tailscale link stopped (was Tailscale restarted or logged out?). Click Try again.");
+                        });
+                    }
+                    catch (InvalidOperationException) { /* the window is closing */ }
+                };
+                SetReadyState(_taildropUrl, secure: true);
+                WarmUpSecureLink(serve);
+            }
+            else
+            {
+                _taildropUrl = $"http://{tailscaleIp}:{Port}";
+                SetReadyState(_taildropUrl, secure: false);
+            }
         }
         finally
         {
@@ -454,8 +495,27 @@ sealed partial class MainForm : Form
         }
     }
 
+    /// <summary>The first visit to a new HTTPS name waits for its certificate; fetch it now, while nobody is waiting.</summary>
+    async void WarmUpSecureLink(TailscaleServe serve)
+    {
+        _warmUp?.Cancel();
+        var warmUp = _warmUp = new CancellationTokenSource();
+        _captionLabel.Text = "Preparing the secure link...";
+        var ready = await serve.WarmUpAsync(warmUp.Token);
+        if (warmUp.IsCancellationRequested || _serve != serve) return;
+        // If this computer can't reach its own name, the phone still can; the certificate then comes on its first visit.
+        _captionLabel.Text = ready ? "Scan with your phone's camera" : "Scan with your phone (the first load can take a moment)";
+    }
+
     async Task StopTaildropAsync()
     {
+        _warmUp?.Cancel();
+        _warmUp = null;
+        if (_serve is not null)
+        {
+            await _serve.DisposeAsync();
+            _serve = null;
+        }
         if (_server is not null)
         {
             try { await _server.StopAsync(); } catch { /* best effort */ }
@@ -492,14 +552,15 @@ sealed partial class MainForm : Form
         _copyButton.Enabled = false;
     }
 
-    void SetReadyState(string url)
+    void SetReadyState(string url, bool secure)
     {
         _failed = false;
         _statusDot.DotColor = Palette.Green;
         _statusDot.Halo = true;
         _statusLabel.Text = "Ready - keep this window open";
         _statusLabel.ForeColor = Palette.Green;
-        _captionLabel.Text = "Scan with your phone's camera";
+        // Over plain HTTP everything works except the live camera; say how to get it, briefly.
+        _captionLabel.Text = secure ? "Scan with your phone's camera" : "Live camera: turn on HTTPS in Tailscale";
         try
         {
             SetQr(CreateQrBitmap(url), "");
@@ -612,31 +673,9 @@ sealed partial class MainForm : Form
 
     #region Tailscale discovery
 
-    static string? FindTailscaleExe()
-    {
-        var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
-        foreach (var dir in pathVar.Split(Path.PathSeparator))
-        {
-            try
-            {
-                if (dir.Length == 0) continue;
-                var candidate = Path.Combine(dir, "tailscale.exe");
-                if (File.Exists(candidate)) return candidate;
-            }
-            catch { /* ignore malformed PATH entries */ }
-        }
-
-        var fallbacks = new[]
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Tailscale", "tailscale.exe")
-        };
-        return fallbacks.FirstOrDefault(File.Exists);
-    }
-
     static string? GetTailscaleIPv4()
     {
-        var tailscalePath = FindTailscaleExe();
+        var tailscalePath = Tailscale.FindExecutable();
         if (tailscalePath is not null)
         {
             try
