@@ -1,7 +1,7 @@
 // Browser tests for the phone page, run against the real Taildrop server (tools/DevHost) in an iPhone-sized
 // Chromium. Prerequisites:
 //   dotnet build tools/DevHost
-//   TAILDROP_SAMPLES_DIR=/tmp/samples dotnet test Taildrop.Core.Tests --filter SamplePhotos
+//   TAILDROP_SAMPLES_DIR=/tmp/samples dotnet test Taildrop.Core.Tests --filter SamplePhotos   (photos and the fake camera video)
 //   npm install --prefix tools/e2e && node tools/e2e/phone.e2e.mjs
 // Environment: SAMPLES (default /tmp/samples), SHOTS (screenshot folder, default /tmp/shots), PORT (default: random).
 
@@ -356,8 +356,159 @@ await step('landscape iPhone', async () => {
   }
 });
 
+// ---------- live camera ----------
+// Chromium's fake camera plays samples/live-camera.mjpeg (written by the SamplePhotos test): a page held still,
+// close-ups sweeping over it, the same page again, then the next page. http://127.0.0.1 counts as a secure page,
+// so the live scanner runs here exactly as on the phone over HTTPS.
+
+const cameraVideo = sample('live-camera.mjpeg');
+let liveBrowser = null;
+if (fs.existsSync(cameraVideo)) {
+  console.log('\nLive camera');
+  liveBrowser = await chromium.launch({
+    args: ['--no-sandbox', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${cameraVideo}`]
+  });
+  const context = await liveBrowser.newContext({ ...phone, baseURL: BASE, permissions: ['camera'] });
+  const live = await context.newPage();
+  live.problems = [];
+  live.on('console', message => { if (['error', 'warning'].includes(message.type())) live.problems.push(`${message.type()}: ${message.text()}`); });
+  live.on('pageerror', error => live.problems.push(`pageerror: ${error.message}`));
+  await live.goto('/');
+  await live.waitForSelector('#connection[data-state="online"]');
+  currentPage = live;
+  const liveState = () => live.evaluate(() => document.querySelector('#view-live').dataset.state);
+  const before = scans().length;
+
+  await step('Scan Document opens the live camera; the page outline follows the paper and it is taken once still', async () => {
+    assert.match(await live.locator('#scanHint').innerText(), /Live camera/);
+    await live.click('#scan');
+    await live.waitForSelector('#view-live:not([hidden])');
+    await live.waitForFunction(() => document.querySelector('#liveVideo').videoWidth > 0);
+    await live.waitForSelector('#livePage.shown', { timeout: 15000 });
+    await shot(live, '20-live-aim');
+    await live.waitForFunction(() => ['taking', 'detail'].includes(document.querySelector('#view-live').dataset.state), null, { timeout: 15000 });
+    assert.deepEqual(await overflowing(live), []);
+  });
+
+  await step('close-ups add detail until the page is sharp, then it is saved to the PC and shown', async () => {
+    await live.waitForSelector('#liveDetail:not([hidden])', { timeout: 20000 });
+    const first = parseInt(await live.locator('#detailPercent').innerText(), 10);
+    await live.waitForFunction(start => parseInt(document.querySelector('#detailPercent').textContent, 10) > start + 10, first, { timeout: 30000 });
+    await shot(live, '21-live-detail');
+    await live.waitForSelector('#liveReview:not([hidden])', { timeout: 90000 });
+    await live.waitForFunction(() => document.querySelector('#liveReviewImage').naturalWidth > 0 && document.querySelector('#liveReviewBusy').hidden);
+    await shot(live, '22-live-review');
+    assert.equal(await live.locator('#liveReviewTitle').innerText(), 'Page 1');
+    assert.equal(scans().length, before + 1);
+    const dims = await live.evaluate(() => ({ w: document.querySelector('#liveReviewImage').naturalWidth, h: document.querySelector('#liveReviewImage').naturalHeight }));
+    assert.ok(Math.abs(dims.w / dims.h - 210 / 297) < 0.03, `page aspect ${dims.w}x${dims.h}`);
+    // The camera keeps running under the review, ready for the next page.
+    assert.equal(await live.evaluate(() => document.querySelector('#liveVideo').srcObject?.active), true);
+  });
+
+  await step('look changes replace the same file on the PC', async () => {
+    const name = scans().at(-1);
+    const size = sizeOf(name);
+    await live.click('[data-live-filter="bw"]');
+    await live.waitForFunction(() => document.querySelector('[data-live-filter="bw"]').getAttribute('aria-checked') === 'true' && document.querySelector('#liveReviewBusy').hidden, null, { timeout: 30000 });
+    assert.equal(scans().length, before + 1);
+    assert.notEqual(sizeOf(name), size);
+  });
+
+  await step('Looks Good goes straight back to the camera for the next page', async () => {
+    await live.click('#liveApprove');
+    assert.ok(await live.locator('#liveReview').isHidden());
+    assert.ok(['aim', 'taking', 'detail'].includes(await liveState()));
+    assert.equal(await live.locator('#liveCount').innerText(), '1 page');
+    assert.ok(await visible(live, '#liveStack'));
+    await shot(live, '23-live-next');
+  });
+
+  await step('Finish saves a page early; Retake removes it again', async () => {
+    await live.waitForSelector('#liveDetail:not([hidden])', { timeout: 60000 });
+    await live.click('#liveFinish');
+    await live.waitForSelector('#liveReview:not([hidden])', { timeout: 60000 });
+    assert.equal(await live.locator('#liveReviewTitle').innerText(), 'Page 2');
+    assert.equal(scans().length, before + 2);
+    await live.click('#liveRetake');
+    await live.waitForFunction(n => document.querySelector('#liveCount').textContent === n, '1 page');
+    await waitFor(() => scans().length === before + 1);
+  });
+
+  await step('Cancel drops a page in progress; Done closes the camera and lists the page', async () => {
+    await live.waitForFunction(() => ['taking', 'detail'].includes(document.querySelector('#view-live').dataset.state), null, { timeout: 60000 });
+    assert.equal(await live.locator('#liveClose').innerText(), 'Cancel');
+    await live.click('#liveClose');
+    assert.equal(await liveState(), 'aim');
+    assert.equal(await live.locator('#liveClose').innerText(), 'Done');
+    await live.click('#liveClose');
+    await live.waitForSelector('#sheet', { state: 'hidden' });
+    assert.equal(await live.evaluate(() => document.querySelector('#liveVideo').srcObject), null, 'camera released');
+    await shot(live, '24-live-home');
+    assert.match(await live.locator('#queue .row .status').first().innerText(), /tap to review/);
+    assert.equal(scans().length, before + 1);
+    // Reopening a live page: look and rotation, but no edge editor (it was built from many frames).
+    await live.locator('#queue .row[data-openable]').first().click();
+    await live.waitForSelector('#view-result:not([hidden])');
+    assert.ok(await live.locator('#adjust').isHidden());
+    assert.ok(await visible(live, '#rotate'));
+    await live.click('#done');
+  });
+
+  await step('dark mode and landscape', async () => {
+    const dark = await liveBrowser.newContext({ ...phone, colorScheme: 'dark', viewport: { width: 844, height: 390 }, screen: { width: 844, height: 390 }, baseURL: BASE, permissions: ['camera'] });
+    const page2 = await dark.newPage();
+    currentPage = page2;
+    await page2.goto('/');
+    await page2.waitForSelector('#connection[data-state="online"]');
+    await page2.click('#scan');
+    await page2.waitForSelector('#liveDetail:not([hidden])', { timeout: 30000 });
+    await page2.waitForTimeout(1500);
+    await shot(page2, '25-live-detail-landscape-dark');
+    assert.deepEqual(await overflowing(page2), []);
+    const finish = await page2.locator('#liveFinish').boundingBox();
+    assert.ok(finish && finish.y + finish.height <= 390 && finish.x + finish.width <= 844, 'Finish on screen in landscape');
+    await page2.click('#liveClose');
+    await page2.click('#liveClose');
+    await dark.close();
+  });
+
+  await step('no console errors on the live camera', async () => {
+    assert.deepEqual(live.problems, []);
+  });
+
+  await step('camera access refused: says how to allow it, and offers a photo instead', async () => {
+    // The full Chromium (not the headless shell) answers a refused prompt the way Safari does: NotAllowedError.
+    const denied = await chromium.launch({ channel: 'chromium', args: ['--no-sandbox', '--use-fake-device-for-media-stream', '--deny-permission-prompts'] });
+    const context2 = await denied.newContext({ ...phone, baseURL: BASE });
+    const page3 = await context2.newPage();
+    currentPage = page3;
+    await page3.goto('/');
+    await page3.waitForSelector('#connection[data-state="online"]');
+    await page3.click('#scan');
+    await page3.waitForSelector('#liveProblem:not([hidden])', { timeout: 15000 });
+    assert.equal(await page3.locator('#liveProblemTitle').innerText(), 'Camera access is off');
+    assert.ok(await visible(page3, '#livePhoto'));
+    await shot(page3, '26-live-camera-denied');
+    await page3.click('#livePhoto');
+    await page3.waitForSelector('#sheet', { state: 'hidden' });
+    await denied.close();
+  });
+} else {
+  console.log(`\nLive camera: skipped (no ${cameraVideo}; run the SamplePhotos test to write it)`);
+}
+
+async function waitFor(condition, timeout = 10000) {
+  const until = Date.now() + timeout;
+  while (!condition()) {
+    if (Date.now() > until) throw new Error('timed out');
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
 // ---------- done ----------
 
+await liveBrowser?.close();
 await browser.close();
 host.kill();
 const failed = results.filter(result => !result.ok);

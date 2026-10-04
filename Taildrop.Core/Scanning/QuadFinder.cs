@@ -36,7 +36,21 @@ static class QuadFinder
             Cv2.ExtractChannel(hsv, Saturation, 1);
             Cv2.Resize(Gray, SmallGray, new Size(), 0.25, 0.25, InterpolationFlags.Area);
             Cv2.Resize(Saturation, SmallSaturation, new Size(), 0.25, 0.25, InterpolationFlags.Area);
+            // Scoring reads these pixel by pixel, millions of times per photo: managed copies avoid a native call per read.
+            _gray = new byte[Width * Height];
+            _gx = new float[Width * Height];
+            _gy = new float[Width * Height];
+            for (var y = 0; y < Height; y++)
+            {
+                System.Runtime.InteropServices.Marshal.Copy(Gray.Ptr(y), _gray, y * Width, Width);
+                System.Runtime.InteropServices.Marshal.Copy(Gx.Ptr(y), _gx, y * Width, Width);
+                System.Runtime.InteropServices.Marshal.Copy(Gy.Ptr(y), _gy, y * Width, Width);
+            }
         }
+
+        readonly byte[] _gray;
+        readonly float[] _gx;
+        readonly float[] _gy;
 
         public void Dispose()
         {
@@ -45,7 +59,7 @@ static class QuadFinder
 
         public bool Inside(double x, double y) => x >= 1 && y >= 1 && x < Width - 2 && y < Height - 2;
 
-        public float GrayAt(double x, double y) => Gray.At<byte>(Math.Clamp((int)Math.Round(y), 0, Height - 1), Math.Clamp((int)Math.Round(x), 0, Width - 1));
+        public float GrayAt(double x, double y) => _gray[Math.Clamp((int)Math.Round(y), 0, Height - 1) * Width + Math.Clamp((int)Math.Round(x), 0, Width - 1)];
 
         /// <summary>Directional derivative along (nx, ny), best within +-2 px along that direction.</summary>
         public double Along(double x, double y, double nx, double ny)
@@ -56,7 +70,8 @@ static class QuadFinder
                 var px = (int)Math.Round(x + nx * k);
                 var py = (int)Math.Round(y + ny * k);
                 if (px < 0 || py < 0 || px >= Width || py >= Height) continue;
-                var d = Gx.At<float>(py, px) * nx + Gy.At<float>(py, px) * ny;
+                var i = py * Width + px;
+                var d = _gx[i] * nx + _gy[i] * ny;
                 if (Math.Abs(d) > Math.Abs(best)) best = d;
             }
             return best;
@@ -67,8 +82,9 @@ static class QuadFinder
 
     sealed record Line(Point2d A, Point2d B, double Length)
     {
-        public Point2d Direction => new((B.X - A.X) / Length, (B.Y - A.Y) / Length);
-        public double Angle => Math.Atan2(B.Y - A.Y, B.X - A.X);
+        // Computed once: the collinear merge compares every pair of segments, which is thousands of times per photo.
+        public Point2d Direction { get; } = new((B.X - A.X) / Length, (B.Y - A.Y) / Length);
+        public double Angle { get; } = Math.Atan2(B.Y - A.Y, B.X - A.X);
     }
 
     public static List<Point2d[]> LineHypotheses(Mat bgr, Evidence evidence)

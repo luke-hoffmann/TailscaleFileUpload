@@ -137,6 +137,88 @@
         </div>
       </div>
     </section>
+
+    <!-- Live camera: the page is found as you point, then sharpened from close-ups -->
+    <section id="view-live" class="view live" data-state="starting" hidden>
+      <div class="live-stage">
+        <video id="liveVideo" playsinline muted autoplay disablepictureinpicture></video>
+        <svg id="liveOverlay" class="live-overlay" aria-hidden="true"><polygon id="livePage" class="live-page" points=""/></svg>
+        <div id="liveFlash" class="live-flash"></div>
+      </div>
+
+      <header class="live-top">
+        <button id="liveClose" class="live-chip" type="button">Close</button>
+        <span id="liveTitle" class="nav-title visually-hidden">Live Scan</span>
+        <span id="liveCount" class="live-chip quiet" hidden></span>
+      </header>
+
+      <p id="liveStatus" class="live-status" role="status" aria-live="polite"><span>Starting camera…</span></p>
+
+      <footer class="live-bottom">
+        <div id="liveAim" class="live-aim">
+          <div id="liveStack" class="live-stack" aria-hidden="true" hidden><img alt=""></div>
+          <button id="liveShutter" class="shutter" type="button" aria-label="Scan this page now">
+            <svg viewBox="0 0 84 84" aria-hidden="true"><circle class="shutter-track" cx="42" cy="42" r="39"/><circle id="liveSteady" class="shutter-steady" cx="42" cy="42" r="39" pathLength="100"/></svg>
+            <span class="shutter-button"></span>
+          </button>
+          <span class="live-aim-spacer"></span>
+        </div>
+
+        <div id="liveDetail" class="live-detail" hidden>
+          <div id="detailMap" class="detail-map" aria-hidden="true">
+            <img id="detailMapImage" alt="">
+            <canvas id="detailMapCells"></canvas>
+          </div>
+          <div class="detail-meter">
+            <p class="detail-label">Detail</p>
+            <p id="detailPercent" class="detail-percent">0%</p>
+            <div class="detail-bar" role="progressbar" aria-label="Detail" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="detailBar"></span></div>
+          </div>
+          <button id="liveFinish" class="live-finish" type="button">Finish</button>
+        </div>
+      </footer>
+
+      <!-- The finished page, over the camera (which keeps running underneath) -->
+      <div id="liveReview" class="live-review" role="dialog" aria-modal="true" aria-labelledby="liveReviewTitle" hidden>
+        <div class="review-card">
+          <div class="review-head">
+            <h3 id="liveReviewTitle" class="nav-title" tabindex="-1">Page 1</h3>
+            <p id="liveReviewStatus" class="status-line ok">Saved to your PC</p>
+          </div>
+          <div class="stage review-stage">
+            <img id="liveReviewImage" alt="The scanned page" decoding="async">
+            <div id="liveReviewBusy" class="stage-busy" hidden><div class="spinner" aria-hidden="true"></div></div>
+          </div>
+          <div class="controls">
+            <div class="segmented" role="radiogroup" aria-label="Look of the scan">
+              <button type="button" role="radio" data-live-filter="auto" aria-checked="true">Auto</button>
+              <button type="button" role="radio" data-live-filter="gray" aria-checked="false">Gray</button>
+              <button type="button" role="radio" data-live-filter="bw" aria-checked="false">B&amp;W</button>
+              <button type="button" role="radio" data-live-filter="original" aria-checked="false">Original</button>
+            </div>
+            <div class="review-actions">
+              <button id="liveRetake" class="action tinted compact" type="button">Retake</button>
+              <button id="liveRotate" class="tool icon" type="button" aria-label="Rotate">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5"/></svg>
+              </button>
+              <button id="liveApprove" class="action primary compact" type="button">Looks Good</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Camera or connection trouble -->
+      <div id="liveProblem" class="live-problem" hidden>
+        <div class="center-stack">
+          <p id="liveProblemTitle" class="big">Camera unavailable</p>
+          <p id="liveProblemText" class="muted"></p>
+          <div class="stack-buttons">
+            <button id="liveRetry" class="action primary compact" type="button">Try Again</button>
+            <button id="livePhoto" class="action tinted compact" type="button">Take a Photo Instead</button>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 
   <input id="files" type="file" multiple hidden>

@@ -53,10 +53,16 @@ public sealed partial class TaildropServer : IAsyncDisposable
         });
 
         _app = builder.Build();
+        _app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15) });
         _app.Use(HandleRequestAsync);
 
         await _app.StartAsync();
+        var bound = _app.Urls.Select(url => new Uri(url.Replace("*", "localhost").Replace("+", "localhost"))).FirstOrDefault();
+        Port = bound?.Port ?? port;
     }
+
+    /// <summary>The port the server listens on (useful after starting on port 0, "any free port").</summary>
+    public int Port { get; private set; }
 
     public async Task StopAsync()
     {
@@ -75,7 +81,7 @@ public sealed partial class TaildropServer : IAsyncDisposable
     {
         var req = context.Request;
         var res = context.Response;
-        SetSecurityHeaders(res);
+        SetSecurityHeaders(req, res);
         try
         {
             if (req.Method == "GET" && req.Path == "/api/health")
@@ -96,6 +102,11 @@ public sealed partial class TaildropServer : IAsyncDisposable
             if (req.Path.StartsWithSegments("/api/scan", out var scanRest))
             {
                 await ScanAsync(context, scanRest.Value ?? "");
+                return;
+            }
+            if (req.Path == "/api/live")
+            {
+                await LiveAsync(context);
                 return;
             }
             if (req.Path.StartsWithSegments("/api"))
@@ -131,7 +142,8 @@ public sealed partial class TaildropServer : IAsyncDisposable
     async Task GenerateQrAsync(HttpRequest req, HttpResponse res)
     {
         var hostHeader = req.Headers.Host.ToString();
-        var address = $"http://{(string.IsNullOrEmpty(hostHeader) ? req.Host.ToString() : hostHeader)}";
+        var scheme = req.Headers["X-Forwarded-Proto"].ToString() == "https" ? "https" : "http";
+        var address = $"{scheme}://{(string.IsNullOrEmpty(hostHeader) ? req.Host.ToString() : hostHeader)}";
         var qr = QrCode.GenerateDataUrl(address);
         await JsonAsync(res, 200, new { qr, url = address });
     }
@@ -288,12 +300,19 @@ public sealed partial class TaildropServer : IAsyncDisposable
         return Task.FromResult(fallback);
     }
 
-    static void SetSecurityHeaders(HttpResponse res)
+    static readonly Regex HostPattern = new(@"^[A-Za-z0-9.\-]+(:\d{1,5})?$", RegexOptions.Compiled);
+
+    static void SetSecurityHeaders(HttpRequest req, HttpResponse res)
     {
         res.Headers["X-Content-Type-Options"] = "nosniff";
         res.Headers["X-Frame-Options"] = "DENY";
         res.Headers["Referrer-Policy"] = "no-referrer";
-        res.Headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'";
+        // The live scanner's WebSocket is same-host, but older Safari doesn't count ws:/wss: as 'self'; name it.
+        var host = req.Headers.Host.ToString();
+        var socket = HostPattern.IsMatch(host) ? $" ws://{host} wss://{host}" : "";
+        res.Headers["Content-Security-Policy"] = $"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'{socket}; media-src 'self' blob:";
+        // The camera is for this page only (it is off for any other origin by default; say so explicitly).
+        res.Headers["Permissions-Policy"] = "camera=(self), microphone=()";
     }
 
     static async Task JsonAsync(HttpResponse res, int status, object body)

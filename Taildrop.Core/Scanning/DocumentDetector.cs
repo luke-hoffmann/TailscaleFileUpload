@@ -35,11 +35,32 @@ public static class DocumentDetector
         return EdgeTracer.Trace(image, corners, best.Score >= (ranked ? ConfidentOverlap : MinConfidence));
     }
 
+    /// <summary>
+    /// Page corners in a live camera frame (normalized, TL TR BR BL), or null when no page is in view. The same
+    /// detector with a shorter list of candidates and straight edges only, so the phone can draw the outline several
+    /// times a second; the frame that is finally captured gets the full <see cref="Detect"/>.
+    /// </summary>
+    public static (double[][] Corners, bool Confident)? DetectQuick(Mat frame)
+    {
+        var scale = Math.Min(1.0, QuickWorkEdge / (double)Math.Max(frame.Width, frame.Height));
+        using var small = new Mat();
+        if (scale < 1) Cv2.Resize(frame, small, new Size(), scale, scale, InterpolationFlags.Area);
+        else frame.CopyTo(small);
+
+        var best = FindPage(small, quick: true);
+        var ranked = best?.Source.EndsWith("ranked") == true;
+        if (best is null || best.Score < (ranked ? MinPredictedOverlap : MinAcceptedScore)) return null;
+        var corners = best.Corners.Select(c => new[] { c.X / small.Width, c.Y / small.Height }).ToArray();
+        return (corners, best.Score >= (ranked ? ConfidentOverlap : MinConfidence));
+    }
+
+    internal const int QuickWorkEdge = 640;
+
     /// <summary>Best page quadrilateral (working-image pixels, TL TR BR BL) among all hypotheses.</summary>
-    internal static QuadFinder.Quad? FindPage(Mat small)
+    internal static QuadFinder.Quad? FindPage(Mat small, bool quick = false)
     {
         using var evidence = new QuadFinder.Evidence(small);
-        var scored = Candidates(small, evidence);
+        var scored = Candidates(small, evidence, quick);
         if (scored.Count == 0) return null;
         if (!UseRanker || !PageRanker.Available) return QuadFinder.WholeSheet(evidence, scored);
         var features = PageRanker.Features(evidence, scored);
@@ -55,10 +76,14 @@ public static class DocumentDetector
     /// <summary>For the benchmark: pick with the hand-tuned rules instead of the trained ranker.</summary>
     internal static bool UseRanker = true;
     internal static int Shortlist = 40;
+    /// <summary>Live preview: fewer line hypotheses get a full score and fewer outlines are re-tried with a side moved out.</summary>
+    internal static int QuickShortlist = 16, QuickExtendTop = 2;
 
     /// <summary>All page hypotheses worth a full score, best first.</summary>
-    internal static List<QuadFinder.Quad> Candidates(Mat small, QuadFinder.Evidence evidence)
+    internal static List<QuadFinder.Quad> Candidates(Mat small, QuadFinder.Evidence evidence, bool quick = false)
     {
+        var shortlistSize = quick ? QuickShortlist : Shortlist;
+        var extendTop = quick ? QuickExtendTop : ExtendTop;
         using var context = new Analysis(small);
 
         var hypotheses = new List<(Point2d[] Corners, string Source)>();
@@ -82,11 +107,13 @@ public static class DocumentDetector
         // Region outlines always get the full score: they are few, and on folded paper they are often the only
         // hypotheses that span the whole sheet.
         var shortlist = hypotheses
+            .AsParallel().AsOrdered()
             .Select(h => (h.Corners, h.Source, Quick: QuadFinder.Score(evidence, h.Corners, withInterior: false).Total))
+            .AsSequential()
             .Where(h => h.Quick > 0)
             .OrderByDescending(h => h.Quick)
             .Select((h, rank) => (h, rank))
-            .Where(x => x.rank < Shortlist || x.h.Source != "lines")
+            .Where(x => x.rank < shortlistSize || x.h.Source != "lines")
             .Select(x => x.h)
             .ToList();
         var scored = shortlist
@@ -96,7 +123,7 @@ public static class DocumentDetector
         // A faint real edge (white paper on a white desk) loses to a line of print just inside it: offer the best
         // outlines again with each side moved out to the next edge beyond it.
         var extended = new List<QuadFinder.Quad>();
-        foreach (var q in scored.Take(ExtendTop))
+        foreach (var q in scored.Take(extendTop))
             for (var side = 0; side < 4; side++)
             {
                 foreach (var corners in QuadFinder.ExtendSide(evidence, q.Corners, side))

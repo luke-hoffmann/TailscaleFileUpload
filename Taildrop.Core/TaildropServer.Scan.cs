@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
+using OpenCvSharp;
 using Taildrop.Core.Scanning;
 
 namespace Taildrop.Core;
@@ -11,6 +12,8 @@ namespace Taildrop.Core;
 /// Document scanning endpoints. The phone uploads a photo; the PC finds the page, flattens it and drops the
 /// finished JPEG into the inbox. The original photo stays in a hidden per-scan folder so the phone can
 /// re-render the same file with a corrected outline, another filter or a rotation, or retake it.
+/// Pages built live from many camera frames (see TaildropServer.Live.cs) keep their flat page instead: they can
+/// change look and rotation, but have no single photo whose edges could be adjusted.
 ///
 ///   POST   /api/scan                 raw photo body (X-Scan-Filter optional)  -> 201 scan
 ///   PUT    /api/scan/{id}            {outline?, filter?, rotate?}             -> 200 scan (file replaced)
@@ -36,6 +39,8 @@ public sealed partial class TaildropServer
         public ScanOutline Outline { get; set; } = new();
         public ScanFilter Filter { get; set; }
         public int Rotate { get; set; }
+        /// <summary>Built live from many frames: re-rendered from the stored flat page, not from a photo and outline.</summary>
+        public bool Live { get; init; }
         public int Version { get; set; }
         public int Width { get; set; }
         public int Height { get; set; }
@@ -44,6 +49,7 @@ public sealed partial class TaildropServer
         public string OriginalPath => Path.Combine(Directory, "original.jpg");
         public string SourcePath => Path.Combine(Directory, "source.jpg");
         public string PreviewPath => Path.Combine(Directory, "preview.jpg");
+        public string FlatPath => Path.Combine(Directory, "flat.jpg");
     }
 
     sealed class ScanUpdate
@@ -186,6 +192,8 @@ public sealed partial class TaildropServer
             if (!_scans.ContainsKey(session.Id)) throw new UploadException(404, "That scan is no longer available");
 
             var outline = session.Outline;
+            if (update.Outline is not null && session.Live)
+                throw new UploadException(400, "The edges of a live scan can't be adjusted. Retake it instead.");
             if (update.Outline is not null)
                 outline = ScanOutline.Sanitize(update.Outline) ?? throw new UploadException(400, "That outline isn't valid");
             var filter = update.Filter is null ? session.Filter : ParseFilter(update.Filter, session.Filter, strict: true);
@@ -193,11 +201,13 @@ public sealed partial class TaildropServer
             if (rotate is not (0 or 90 or 180 or 270)) throw new UploadException(400, "Rotation must be 0, 90, 180 or 270");
 
             byte[] original;
-            try { original = await File.ReadAllBytesAsync(session.OriginalPath, ct); }
+            try { original = await File.ReadAllBytesAsync(session.Live ? session.FlatPath : session.OriginalPath, ct); }
             catch (IOException) { throw new UploadException(404, "That scan is no longer available"); }
 
             using var photo = ScanPipeline.Decode(original);
-            var render = await ScanPipeline.RenderAsync(photo, outline, filter, rotate, ct);
+            var render = session.Live
+                ? await ScanPipeline.RenderFlatAsync(photo, filter, rotate, ct)
+                : await ScanPipeline.RenderAsync(photo, outline, filter, rotate, ct);
             await File.WriteAllBytesAsync(session.PreviewPath, render.Preview, ct);
             await ReplaceInboxFileAsync(session, render.Jpeg, ct);
 
@@ -233,10 +243,46 @@ public sealed partial class TaildropServer
         filter = FilterName(session.Filter),
         rotate = session.Rotate,
         version = session.Version,
+        live = session.Live,
+        adjustable = !session.Live,
         outline = session.Outline,
         previewUrl = $"/api/scan/{session.Id}/preview?v={session.Version}",
-        sourceUrl = $"/api/scan/{session.Id}/source"
+        sourceUrl = session.Live ? null : $"/api/scan/{session.Id}/source"
     };
+
+    /// <summary>Saves a page built live from many frames: a new inbox file, plus a session for look/rotation changes and retakes.</summary>
+    async Task<object> SaveLiveScanAsync(Mat flat, ScanOutline outline, ScanFilter filter, CancellationToken ct)
+    {
+        var render = await ScanPipeline.RenderFlatAsync(flat, filter, 0, ct);
+        var id = Guid.NewGuid().ToString("N");
+        var session = new ScanSession
+        {
+            Id = id,
+            Directory = Path.Combine(_inboxDir, ".scans", id),
+            Created = DateTime.UtcNow,
+            Outline = outline,
+            Filter = filter,
+            Live = true
+        };
+
+        try
+        {
+            Directory.CreateDirectory(session.Directory);
+            await File.WriteAllBytesAsync(session.FlatPath, ScanPipeline.EncodeFlat(flat), ct);
+            await File.WriteAllBytesAsync(session.PreviewPath, render.Preview, ct);
+            session.FileName = await WriteNewInboxFileAsync(render.Jpeg, ct);
+        }
+        catch
+        {
+            try { Directory.Delete(session.Directory, recursive: true); } catch { /* best effort */ }
+            throw;
+        }
+
+        ApplyRender(session, render);
+        _scans[id] = session;
+        EvictOldScans();
+        return DescribeScan(session);
+    }
 
     static async Task SendImageAsync(HttpContext context, string path)
     {

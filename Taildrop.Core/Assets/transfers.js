@@ -178,7 +178,7 @@ function statusText(job) {
       }
       return job.total ? `${percent(job)}% · ${formatBytes(job.loaded)} of ${formatBytes(job.total)}` : `${formatBytes(job.loaded)} sent`;
     case 'sent':
-      if (job.kind === 'scan') return 'Sent · tap to adjust';
+      if (job.kind === 'scan') return job.scan?.adjustable === false ? 'Sent · tap to review' : 'Sent · tap to adjust';
       return `Sent · ${formatBytes(job.size)}${job.speed ? ` · ${job.speed}` : ''}`;
     case 'failed': return job.message || 'Failed';
     default: return '';
@@ -248,7 +248,7 @@ export function render(job) {
     li.dataset.openable = '';
     li.tabIndex = 0;
     li.setAttribute('role', 'button');
-    li.setAttribute('aria-label', `${job.name}. Tap to adjust.`);
+    li.setAttribute('aria-label', `${job.name}. ${job.scan.adjustable === false ? 'Tap to review.' : 'Tap to adjust.'}`);
     li.onclick = () => openScan?.(job);
     li.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openScan?.(job); } };
   } else {
@@ -396,6 +396,14 @@ export function startScan(file, filter = 'auto', { onProgress, onPhase } = {}) {
     });
   promise.abort = upload.abort;
   return { job, promise };
+}
+
+/** A page the live scanner has already saved on the PC: it joins the list as sent. */
+export function addSavedScan(scan) {
+  const job = makeJob({ kind: 'scan', name: scan.name, size: scan.size, total: scan.size });
+  addJobs([job]);
+  finishScan(job, scan);
+  return job;
 }
 
 /** Marks the scan's row as finished and shows its (new) preview. */

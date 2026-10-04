@@ -104,6 +104,32 @@ static class Geometry
         };
     }
 
+    /// <summary>Product of two row-major 3x3 matrices: applying the result is applying <paramref name="b"/>, then <paramref name="a"/>.</summary>
+    public static double[] Multiply(double[] a, double[] b)
+    {
+        var result = new double[9];
+        for (var r = 0; r < 3; r++)
+            for (var c = 0; c < 3; c++)
+                result[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+        return result;
+    }
+
+    /// <summary>
+    /// How many destination pixels one source pixel covers at (x, y) under a homography (the square root of the
+    /// Jacobian's determinant). For a page-to-photo homography: photo pixels per page pixel there.
+    /// </summary>
+    public static double Scale(double[] m, double x, double y)
+    {
+        var w = m[6] * x + m[7] * y + m[8];
+        var u = (m[0] * x + m[1] * y + m[2]) / w;
+        var v = (m[3] * x + m[4] * y + m[5]) / w;
+        var dudx = (m[0] - m[6] * u) / w;
+        var dudy = (m[1] - m[7] * u) / w;
+        var dvdx = (m[3] - m[6] * v) / w;
+        var dvdy = (m[4] - m[7] * v) / w;
+        return Math.Sqrt(Math.Abs(dudx * dvdy - dudy * dvdx));
+    }
+
     public static Point2d Apply(double[] m, double x, double y)
     {
         var w = m[6] * x + m[7] * y + m[8];

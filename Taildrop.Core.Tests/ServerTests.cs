@@ -101,7 +101,7 @@ public class ServerTests : IClassFixture<ServerFixture>
         var second = new HttpRequestMessage(HttpMethod.Get, "/");
         second.Headers.TryAddWithoutValidation("If-None-Match", etag);
         Assert.Equal(HttpStatusCode.NotModified, (await _f.Http.SendAsync(second)).StatusCode);
-        foreach (var asset in new[] { "/app.js", "/transfers.js", "/scan.js", "/editor.js", "/styles.css", "/favicon.svg" })
+        foreach (var asset in new[] { "/app.js", "/transfers.js", "/scan.js", "/live.js", "/editor.js", "/styles.css", "/favicon.svg" })
             Assert.Equal(HttpStatusCode.OK, (await _f.Http.GetAsync(asset)).StatusCode);
         var icon = await _f.Http.GetAsync("/apple-touch-icon.png");
         Assert.Equal("image/png", icon.Content.Headers.ContentType!.MediaType);

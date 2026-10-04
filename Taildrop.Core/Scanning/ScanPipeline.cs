@@ -65,6 +65,25 @@ public static class ScanPipeline
     {
         using var flat = PageFlattener.Flatten(image, outline);
         EdgeCleaner.Clean(image, outline, flat);
+        return Finish(flat, filter, rotateClockwise);
+    }
+
+    /// <summary>Renders an already flat page (a live scan built from many frames): look, rotation, encoding.</summary>
+    public static async Task<ScanRender> RenderFlatAsync(Mat flat, ScanFilter filter, int rotateClockwise, CancellationToken cancellationToken = default)
+    {
+        await Gate.WaitAsync(cancellationToken);
+        try
+        {
+            return await Task.Run(() => Finish(flat, filter, rotateClockwise), cancellationToken);
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
+    static ScanRender Finish(Mat flat, ScanFilter filter, int rotateClockwise)
+    {
         using var enhanced = ScanEnhancer.Apply(flat, filter);
         using var rotated = Rotate(enhanced, rotateClockwise);
 
@@ -72,6 +91,9 @@ public static class ScanPipeline
         using var preview = Resize(rotated, 900);
         return new ScanRender(jpeg, Encode(preview, 80), rotated.Width, rotated.Height);
     }
+
+    /// <summary>Near-lossless JPEG of a flat page, kept so a live scan can be re-rendered with another look or rotation.</summary>
+    public static byte[] EncodeFlat(Mat flat) => Encode(flat, 95);
 
     /// <summary>A screen-sized JPEG of the photo for the "adjust edges" view (coordinates match the outline's).</summary>
     public static byte[] EncodeSource(Mat image, int longEdge = 1600)

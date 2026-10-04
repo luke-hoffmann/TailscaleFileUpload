@@ -18,13 +18,17 @@ public static class PageFlattener
 
     static readonly double[] StandardRatios = { 297.0 / 210.0, 11.0 / 8.5 };
 
-    public static Mat Flatten(Mat image, ScanOutline outline)
+    /// <summary>
+    /// Flattens the page at its natural size (<see cref="OutputSize"/>), or at <paramref name="size"/> when given
+    /// (the live detail canvas renders the first frame at the final, larger resolution and refines it from there).
+    /// </summary>
+    public static Mat Flatten(Mat image, ScanOutline outline, Size? size = null)
     {
         var imageWidth = image.Width;
         var imageHeight = image.Height;
 
         var corners = outline.Corners.Select(c => new Point2d(c[0] * imageWidth, c[1] * imageHeight)).ToArray();
-        var (width, height) = OutputSize(corners, imageWidth, imageHeight);
+        var (width, height) = size is { } wanted ? (wanted.Width, wanted.Height) : OutputSize(corners, imageWidth, imageHeight);
 
         // Homography from the photo to a flat width x height page.
         var toPage = Geometry.Homography(corners, new[]

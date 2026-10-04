@@ -10,7 +10,7 @@ const app = $('#app');
 const sheet = $('#sheet');
 const camera = $('#camera');
 const photos = $('#photos');
-const views = { wait: $('#view-wait'), busy: $('#view-busy'), result: $('#view-result'), adjust: $('#view-adjust') };
+const views = { wait: $('#view-wait'), busy: $('#view-busy'), result: $('#view-result'), adjust: $('#view-adjust'), live: $('#view-live') };
 
 const resultImage = $('#resultImage');
 const resultBusy = $('#resultBusy');
@@ -24,6 +24,7 @@ let pages = 0;           // pages scanned in this visit (for the "Scan 2" title)
 let current = null;      // { job, scan, busy } — the page on screen
 let lastFile = null;     // the photo being scanned, kept for "Try Again" / "Send As-Is"
 let pending = null;      // the in-flight scan request
+const closeListeners = new Set();
 
 const editor = new OutlineEditor({
   wrap: $('#photoWrap'),
@@ -47,7 +48,16 @@ function closeSheet() {
   sheet.hidden = true;
   app.removeAttribute('inert');
   document.body.style.overflow = '';
+  closeListeners.forEach(listener => listener());
 }
+
+/** The live camera (live.js) shares this sheet: it opens its own view and hears when the sheet closes. */
+export function openSheetView(name) {
+  openSheet();
+  show(name);
+}
+export function onSheetClose(listener) { closeListeners.add(listener); }
+export { closeSheet };
 
 function show(name) {
   for (const [key, view] of Object.entries(views)) view.hidden = key !== name;
@@ -137,6 +147,8 @@ for (const input of [camera, photos]) {
 function showResult() {
   const { scan, job } = current;
   $('#resultTitle').textContent = job.pageNumber ? `Scan ${job.pageNumber}` : 'Scan';
+  // A live scan was built from many frames: there is no single photo whose edges could be adjusted.
+  $('#adjust').hidden = scan.adjustable === false;
   markFilter(scan.filter);
   setStatus('Saved to your PC', 'ok');
   show('result');
@@ -257,7 +269,7 @@ setScanOpener(job => {
 });
 
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && !sheet.hidden && views.busy.hidden) {
+  if (event.key === 'Escape' && !sheet.hidden && views.busy.hidden && views.live.hidden) {
     if (!views.adjust.hidden) show('result'); else closeSheet();
   }
 });

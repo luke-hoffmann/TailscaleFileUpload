@@ -29,7 +29,35 @@ public class SamplePhotos
             Cv2.ImWrite(Path.Combine(directory, name + ".jpg"), scene.Photo, new ImageEncodingParam(ImwriteFlags.JpegQuality, 88));
         }
         File.WriteAllBytes(Path.Combine(directory, "not-a-photo.jpg"), Enumerable.Range(0, 5000).Select(i => (byte)(i * 31)).ToArray());
+        WriteLiveCamera(Path.Combine(directory, "live-camera.mjpeg"));
         File.WriteAllText(Path.Combine(directory, "notes.txt"), "hello from the phone\n");
         File.WriteAllBytes(Path.Combine(directory, "movie.mp4"), new byte[300_000]);
+    }
+
+    /// <summary>
+    /// A phone's view while scanning, for Chromium's fake camera (--use-file-for-fake-video-capture, 30 frames a
+    /// second, looping): a page held still, close-ups sweeping over it, the same page again, then the next page.
+    /// </summary>
+    static void WriteLiveCamera(string path)
+    {
+        var size = new Size(1080, 1920);
+        using var first = SyntheticDocument.Make(2480, 3508, seed: 31);
+        using var second = SyntheticDocument.Make(2480, 3508, seed: 32);
+        using var output = File.Create(path);
+
+        void Hold(Mat frame, int frames)
+        {
+            Cv2.ImEncode(".jpg", frame, out var jpeg, new ImageEncodingParam(ImwriteFlags.JpegQuality, 80));
+            for (var i = 0; i < frames; i++) output.Write(jpeg);
+        }
+
+        var (whole, _) = SyntheticDocument.WholePage(first, size);
+        using (whole) Hold(whole, 90);                                      // 3 s: the page, held still
+        foreach (var closeUp in SyntheticDocument.CloseUps(first, size, columns: 4, rows: 5, density: 1.2, seed: 6))
+            using (closeUp) Hold(closeUp, 30);                              // 20 s: a slow sweep, 1 s per spot
+        var (again, _) = SyntheticDocument.WholePage(first, size);
+        using (again) Hold(again, 60);                                      // 2 s: the same page again
+        var (next, _) = SyntheticDocument.WholePage(second, size);
+        using (next) Hold(next, 120);                                       // 4 s: the next page
     }
 }

@@ -275,7 +275,7 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .segmented button:disabled { opacity: 0.45; }
 
-.tool-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; }
+.tool-row { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0.65rem; }
 .tool {
   display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.15rem 0.5rem; text-align: center;
   min-height: 2.9rem; padding: 0 0.75rem;
@@ -311,11 +311,181 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .loupe[hidden] { display: none; }
 
+/* ---------- Live camera ----------
+   Always dark, edge to edge (under the notch and the home indicator), with frosted controls floating over the
+   picture, like the system camera. The finished page slides up over the camera, which keeps running beneath. */
+
+.view.live {
+  position: fixed; inset: 0; z-index: 1;
+  width: 100%; margin: 0;
+  background: #000; color: #fff;
+  overflow: hidden;
+  --live-tint: #4cd080;
+  --live-glass: rgba(28, 28, 30, 0.58);
+  --live-glass-strong: rgba(28, 28, 30, 0.78);
+  --live-needs: 255, 179, 64; /* amber: areas that still need detail */
+}
+
+.live-stage { position: absolute; inset: 0; }
+#liveVideo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+.live-overlay { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.live-page {
+  fill: rgba(76, 208, 128, 0.16); stroke: var(--live-tint); stroke-width: 3; stroke-linejoin: round;
+  opacity: 0; transition: opacity 0.18s ease, fill 0.2s ease, stroke 0.2s ease;
+  filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.35));
+}
+.live-page.shown { opacity: 1; }
+.live-page.unsure { fill: rgba(255, 255, 255, 0.08); stroke: rgba(255, 255, 255, 0.85); stroke-width: 2; }
+.live-page.same { fill: rgba(255, 255, 255, 0.06); stroke: rgba(255, 255, 255, 0.7); stroke-dasharray: 10 8; }
+.live-page.locked { fill: rgba(76, 208, 128, 0.3); }
+.live-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+.live-flash.go { animation: flash 0.42s ease-out; }
+
+.live-top {
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  padding: calc(0.6rem + env(safe-area-inset-top)) calc(0.85rem + env(safe-area-inset-right)) 0.6rem calc(0.85rem + env(safe-area-inset-left));
+  background: linear-gradient(rgba(0, 0, 0, 0.42), transparent);
+  pointer-events: none;
+}
+.live-top > * { pointer-events: auto; }
+
+.live-chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 2.5rem; padding: 0 1rem;
+  border: 0; border-radius: 999px;
+  background: var(--live-glass); color: #fff;
+  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  font-size: 0.95rem; font-weight: 600; cursor: pointer; touch-action: manipulation;
+}
+.live-chip.quiet { font-weight: 500; color: rgba(255, 255, 255, 0.86); cursor: default; }
+.live-chip:active:not(.quiet) { opacity: 0.6; }
+
+.live-status {
+  position: absolute; left: 1rem; right: 1rem;
+  top: calc(4rem + env(safe-area-inset-top));
+  display: flex; justify-content: center;
+  pointer-events: none;
+}
+.live-status span {
+  display: block; max-width: 100%; padding: 0.55rem 1rem;
+  border-radius: 999px;
+  background: var(--live-glass-strong); color: #fff;
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+  font-size: 0.95rem; font-weight: 600; text-align: center; letter-spacing: -0.005em;
+  transition: background 0.2s ease;
+}
+.live-status.ok span { background: rgba(30, 106, 61, 0.86); }
+.live-status.warn span { background: rgba(150, 90, 0, 0.86); }
+.live-status:empty, .live-status span:empty { display: none; }
+
+.live-bottom {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 1.5rem calc(1rem + env(safe-area-inset-right)) calc(1.1rem + env(safe-area-inset-bottom)) calc(1rem + env(safe-area-inset-left));
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.5));
+}
+
+.live-aim { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; justify-items: center; }
+.live-aim-spacer { display: block; grid-column: 3; }
+.live-aim .shutter { grid-column: 2; grid-row: 1; }
+.live-stack {
+  grid-column: 1; grid-row: 1; justify-self: start; position: relative;
+  width: 3.1rem; height: 4rem; border-radius: 6px; overflow: hidden;
+  background: #222; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 4px 4px 0 -1px rgba(255, 255, 255, 0.35);
+}
+.live-stack[hidden] { display: none; }
+.live-stack img { width: 100%; height: 100%; object-fit: cover; }
+
+.shutter {
+  position: relative; display: grid; place-items: center;
+  width: 5.25rem; height: 5.25rem; padding: 0;
+  border: 0; border-radius: 50%; background: none;
+  cursor: pointer; touch-action: manipulation;
+}
+.shutter svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.shutter-track { fill: none; stroke: #fff; stroke-width: 4; }
+.shutter-steady { fill: none; stroke: var(--live-tint); stroke-width: 5; stroke-linecap: round; stroke-dasharray: 0 100; transition: stroke-dasharray 0.12s linear; }
+.shutter-button { width: 4.1rem; height: 4.1rem; border-radius: 50%; background: #fff; transition: transform 0.12s ease, background 0.12s ease; }
+.shutter:active .shutter-button { transform: scale(0.9); }
+.shutter:disabled { cursor: default; }
+.shutter:disabled .shutter-button { background: rgba(255, 255, 255, 0.45); }
+
+.live-detail {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.9rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 22px;
+  background: var(--live-glass-strong);
+  -webkit-backdrop-filter: blur(22px) saturate(1.4); backdrop-filter: blur(22px) saturate(1.4);
+}
+.live-detail[hidden] { display: none; }
+.detail-map {
+  position: relative; height: 7.5rem; aspect-ratio: 0.707;
+  border-radius: 6px; overflow: hidden; background: #e9ecee;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+.detail-map img, .detail-map canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.detail-map img { object-fit: fill; }
+.detail-map.busy::after {
+  content: ""; position: absolute; inset: calc(50% - 1rem); width: 2rem; height: 2rem; border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.35); border-top-color: #fff; animation: spin 0.8s linear infinite;
+}
+.detail-meter { min-width: 0; }
+.detail-label { color: rgba(255, 255, 255, 0.7); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.detail-percent { font-size: 2.1rem; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.detail-bar { height: 5px; margin-top: 0.45rem; overflow: hidden; border-radius: 5px; background: rgba(255, 255, 255, 0.2); }
+.detail-bar span { display: block; width: 0; height: 100%; border-radius: 5px; background: var(--live-tint); transition: width 0.3s ease; }
+.live-finish {
+  min-width: 4.75rem; min-height: 2.9rem; padding: 0 1rem;
+  border: 0; border-radius: 999px; background: #fff; color: #000;
+  font-size: 1rem; font-weight: 650; cursor: pointer; touch-action: manipulation;
+}
+.live-finish:active { opacity: 0.7; }
+.live-finish:disabled { opacity: 0.45; }
+
+.live-review {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  padding-top: calc(2.5rem + env(safe-area-inset-top));
+  background: rgba(0, 0, 0, 0.35);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  animation: fade-in 0.2s ease;
+}
+.live-review[hidden] { display: none; }
+.review-card {
+  display: flex; flex-direction: column; min-height: 0; max-height: 100%; flex: 1;
+  width: min(720px, 100%); margin: 0 auto;
+  padding: 0.75rem 0 env(safe-area-inset-bottom);
+  border-radius: 22px 22px 0 0;
+  background: var(--bg); color: var(--label);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.35);
+  animation: slide-up 0.32s cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+.review-card::before { content: ""; align-self: center; width: 2.4rem; height: 5px; margin-bottom: 0.35rem; border-radius: 5px; background: var(--separator); }
+.review-head { display: grid; justify-items: center; gap: 0.1rem; padding: 0 1rem; }
+.review-head .nav-title { font-size: 1.15rem; }
+.review-head .status-line { margin: 0; }
+.review-stage { min-height: 8rem; }
+.review-actions { display: grid; grid-template-columns: 1fr auto 1.5fr; gap: 0.65rem; align-items: stretch; }
+.review-actions .action.compact { width: auto; min-height: 3.25rem; }
+.tool.icon { min-width: 3.25rem; padding: 0; }
+.tool.icon svg { width: 1.4rem; height: 1.4rem; }
+
+.live-problem { position: absolute; inset: 0; z-index: 3; display: grid; background: var(--bg); color: var(--label); padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+.live-problem[hidden] { display: none; }
+
+/* Not running yet, or between pages: the shutter waits. */
+.view.live[data-state="starting"] .shutter, .view.live[data-state="connecting"] .shutter { opacity: 0.5; }
+
+@keyframes flash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
+@keyframes slide-up { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
+  .live-flash.go, .review-card, .live-review { animation: none; }
   .spinner { animation-duration: 3s; }
   .bar.indeterminate span { animation: none; width: 100%; opacity: 0.5; }
 }
@@ -339,4 +509,15 @@ button:focus:not(:focus-visible) { outline: none; }
   #view-result .status-line, #view-adjust .hint { grid-column: 2; grid-row: 2; align-self: end; margin-inline: 0.5rem; }
   #view-result .controls, #view-adjust .controls { grid-column: 2; grid-row: 3; padding-left: 0.5rem; }
   #view-adjust .hint { text-align: left; }
+
+  /* Live camera held sideways: the detail panel and shutter move to the right edge. */
+  .live-bottom { left: auto; top: 0; width: min(24rem, 50%); display: flex; flex-direction: column; justify-content: flex-end; background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.45)); }
+  .live-aim { grid-template-columns: 1fr; grid-template-rows: auto auto; gap: 0.75rem; justify-items: end; }
+  .live-aim-spacer { display: none; }
+  .live-aim .shutter { grid-column: 1; grid-row: 1; }
+  .live-stack { grid-column: 1; grid-row: 2; justify-self: end; }
+  .review-card { flex-direction: row; flex-wrap: wrap; align-content: flex-start; }
+  .review-head { flex: 1 0 100%; }
+  .review-card .review-stage { flex: 1 1 50%; height: calc(100% - 3.5rem); }
+  .review-card .controls { flex: 0 0 min(22rem, 45%); align-self: end; }
 }
