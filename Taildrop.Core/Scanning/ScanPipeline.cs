@@ -11,6 +11,9 @@ public sealed class ScanException : Exception
 
 public sealed record ScanRender(byte[] Jpeg, byte[] Preview, int Width, int Height);
 
+/// <summary>A page rendered for a multi-page PDF instead of as its own JPEG.</summary>
+public sealed record PdfPageRender(PdfPage Page, byte[] Preview);
+
 /// <summary>Decode → find page → flatten → clean up → encode. Stateless; the server owns sessions.</summary>
 public static class ScanPipeline
 {
@@ -63,14 +66,40 @@ public static class ScanPipeline
 
     public static ScanRender Render(Mat image, ScanOutline outline, ScanFilter filter, int rotateClockwise)
     {
-        using var flat = PageFlattener.Flatten(image, outline);
-        EdgeCleaner.Clean(image, outline, flat);
-        using var enhanced = ScanEnhancer.Apply(flat, filter);
-        using var rotated = Rotate(enhanced, rotateClockwise);
+        using var rotated = RenderPage(image, outline, filter, rotateClockwise);
 
         var jpeg = Encode(rotated, JpegQuality);
         using var preview = Resize(rotated, 900);
         return new ScanRender(jpeg, Encode(preview, 80), rotated.Width, rotated.Height);
+    }
+
+    /// <summary>Like <see cref="RenderAsync"/>, but lays the page out for a multi-page PDF.</summary>
+    public static async Task<PdfPageRender> RenderPdfPageAsync(Mat image, ScanOutline outline, ScanFilter filter, int rotateClockwise, CancellationToken cancellationToken = default)
+    {
+        await Gate.WaitAsync(cancellationToken);
+        try
+        {
+            return await Task.Run(() => RenderPdfPage(image, outline, filter, rotateClockwise), cancellationToken);
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
+    public static PdfPageRender RenderPdfPage(Mat image, ScanOutline outline, ScanFilter filter, int rotateClockwise)
+    {
+        using var rotated = RenderPage(image, outline, filter, rotateClockwise);
+        using var preview = Resize(rotated, 900);
+        return new PdfPageRender(PdfWriter.CreatePage(rotated, filter), Encode(preview, 80));
+    }
+
+    static Mat RenderPage(Mat image, ScanOutline outline, ScanFilter filter, int rotateClockwise)
+    {
+        using var flat = PageFlattener.Flatten(image, outline);
+        EdgeCleaner.Clean(image, outline, flat);
+        using var enhanced = ScanEnhancer.Apply(flat, filter);
+        return Rotate(enhanced, rotateClockwise);
     }
 
     /// <summary>A screen-sized JPEG of the photo for the "adjust edges" view (coordinates match the outline's).</summary>
@@ -104,7 +133,7 @@ public static class ScanPipeline
         return result;
     }
 
-    static byte[] Encode(Mat image, int quality)
+    internal static byte[] Encode(Mat image, int quality)
     {
         // 4:4:4 chroma (no subsampling) keeps colored print and thin colored lines crisp.
         Cv2.ImEncode(".jpg", image, out var bytes,

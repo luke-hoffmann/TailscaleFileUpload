@@ -19,6 +19,7 @@ namespace Taildrop.Core;
 ///   GET    /api/scan/{id}/source     ~1600 px JPEG of the photo (EXIF applied) the outline's coordinates refer to
 ///
 /// State-changing calls require an <c>X-Taildrop</c> header, which no cross-site form or simple request can send.
+/// Pages of a multi-page PDF go through the same endpoints; see TaildropServer.Pdf.cs.
 /// </summary>
 public sealed partial class TaildropServer
 {
@@ -40,6 +41,8 @@ public sealed partial class TaildropServer
         public int Width { get; set; }
         public int Height { get; set; }
         public long Size { get; set; }
+        /// <summary>Set when this scan is a page of a multi-page PDF rather than its own JPEG.</summary>
+        public PdfSession? Pdf { get; init; }
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public string OriginalPath => Path.Combine(Directory, "original.jpg");
         public string SourcePath => Path.Combine(Directory, "source.jpg");
@@ -77,6 +80,8 @@ public sealed partial class TaildropServer
     {
         foreach (var session in _scans.Values)
             if (string.Equals(session.FileName, oldName, StringComparison.Ordinal)) session.FileName = newName;
+        foreach (var pdf in _pdfs.Values)
+            if (string.Equals(pdf.FileName, oldName, StringComparison.Ordinal)) pdf.FileName = newName;
     }
 
     /// <summary>The desktop UI deleted an inbox file; drop the scan session (and its stored photo) behind it.</summary>
@@ -84,6 +89,8 @@ public sealed partial class TaildropServer
     {
         foreach (var session in _scans.Values.Where(s => string.Equals(s.FileName, name, StringComparison.Ordinal)).ToList())
             DiscardScan(session);
+        foreach (var pdf in _pdfs.Values.Where(p => string.Equals(p.FileName, name, StringComparison.Ordinal)).ToList())
+            DiscardPdf(pdf);
     }
 
     async Task ScanAsync(HttpContext context, string rest)
@@ -114,6 +121,9 @@ public sealed partial class TaildropServer
                 case (1, "PUT"):
                     await UpdateScanAsync(context, session);
                     return;
+                case (1, "DELETE") when session.Pdf is { } pdf:
+                    await RemovePdfPageAsync(context, session, pdf);
+                    return;
                 case (1, "DELETE"):
                     DiscardScan(session, deleteInboxFile: true);
                     await JsonAsync(res, 200, new { ok = true });
@@ -134,6 +144,13 @@ public sealed partial class TaildropServer
     {
         var ct = context.RequestAborted;
         var filter = ParseFilter(context.Request.Headers["X-Scan-Filter"].ToString(), ScanFilter.Auto);
+        var pdfTarget = context.Request.Headers["X-Scan-Pdf"].ToString();
+        if (pdfTarget.Length > 0)
+        {
+            await CreatePdfPageAsync(context, filter, pdfTarget);
+            return;
+        }
+
         var data = await ReadBodyAsync(context.Request, MaxScanPhotoSize, "That photo is larger than 64 MB", ct);
 
         using var photo = ScanPipeline.Decode(data);
@@ -157,7 +174,7 @@ public sealed partial class TaildropServer
             await File.WriteAllBytesAsync(session.OriginalPath, data, ct);
             await File.WriteAllBytesAsync(session.SourcePath, source, ct);
             await File.WriteAllBytesAsync(session.PreviewPath, render.Preview, ct);
-            session.FileName = await WriteNewInboxFileAsync(render.Jpeg, ct);
+            session.FileName = await WriteNewInboxFileAsync(ScanFileStem(DateTime.Now) + ".jpg", render.Jpeg, ct);
         }
         catch
         {
@@ -197,15 +214,25 @@ public sealed partial class TaildropServer
             catch (IOException) { throw new UploadException(404, "That scan is no longer available"); }
 
             using var photo = ScanPipeline.Decode(original);
-            var render = await ScanPipeline.RenderAsync(photo, outline, filter, rotate, ct);
-            await File.WriteAllBytesAsync(session.PreviewPath, render.Preview, ct);
-            await ReplaceInboxFileAsync(session, render.Jpeg, ct);
+            if (session.Pdf is { } pdf)
+            {
+                var page = await ScanPipeline.RenderPdfPageAsync(photo, outline, filter, rotate, ct);
+                await File.WriteAllBytesAsync(session.PreviewPath, page.Preview, ct);
+                await ReplacePdfPageAsync(pdf, session.Id, page.Page, ct);
+                ApplyRender(session, page.Page);
+            }
+            else
+            {
+                var render = await ScanPipeline.RenderAsync(photo, outline, filter, rotate, ct);
+                await File.WriteAllBytesAsync(session.PreviewPath, render.Preview, ct);
+                session.FileName = await ReplaceInboxFileAsync(session.FileName, ScanFileStem(DateTime.Now) + ".jpg", render.Jpeg, ct);
+                ApplyRender(session, render);
+            }
 
             session.Outline = outline;
             session.Filter = filter;
             session.Rotate = rotate;
             session.Version++;
-            ApplyRender(session, render);
         }
         finally
         {
@@ -225,7 +252,7 @@ public sealed partial class TaildropServer
     static object DescribeScan(ScanSession session) => new
     {
         id = session.Id,
-        name = session.FileName,
+        name = session.Pdf?.FileName ?? session.FileName,
         width = session.Width,
         height = session.Height,
         size = session.Size,
@@ -235,7 +262,8 @@ public sealed partial class TaildropServer
         version = session.Version,
         outline = session.Outline,
         previewUrl = $"/api/scan/{session.Id}/preview?v={session.Version}",
-        sourceUrl = $"/api/scan/{session.Id}/source"
+        sourceUrl = $"/api/scan/{session.Id}/source",
+        pdf = session.Pdf is null ? null : DescribePdf(session.Pdf, session.Id)
     };
 
     static async Task SendImageAsync(HttpContext context, string path)
@@ -253,11 +281,12 @@ public sealed partial class TaildropServer
         await res.Body.WriteAsync(bytes, context.RequestAborted);
     }
 
-    /// <summary>Writes a brand-new, uniquely named scan file into the inbox and returns its name.</summary>
-    async Task<string> WriteNewInboxFileAsync(byte[] jpeg, CancellationToken ct)
+    /// <summary>"Scan 2026-10-02 at 14.31.05", the name of a scan file before its extension.</summary>
+    static string ScanFileStem(DateTime time) => string.Create(CultureInfo.InvariantCulture, $"Scan {time:yyyy-MM-dd} at {time:HH.mm.ss}");
+
+    /// <summary>Writes a brand-new scan file into the inbox under <paramref name="wanted"/> (made unique) and returns its name.</summary>
+    async Task<string> WriteNewInboxFileAsync(string wanted, byte[] data, CancellationToken ct)
     {
-        var now = DateTime.Now;
-        var wanted = string.Create(CultureInfo.InvariantCulture, $"Scan {now:yyyy-MM-dd} at {now:HH.mm.ss}.jpg");
         var name = await ReserveAvailableNameAsync(wanted);
         try
         {
@@ -265,7 +294,7 @@ public sealed partial class TaildropServer
             var temp = TempPartPath();
             try
             {
-                await File.WriteAllBytesAsync(temp, jpeg, ct);
+                await File.WriteAllBytesAsync(temp, data, ct);
                 File.Move(temp, finalPath);
             }
             catch
@@ -282,28 +311,25 @@ public sealed partial class TaildropServer
     }
 
     /// <summary>
-    /// Replaces the scan's inbox file in place. If the PC user already removed it, the scan comes back as a
-    /// new file rather than being silently lost.
+    /// Replaces a scan's inbox file in place and returns its name. If the PC user already removed it, the scan
+    /// comes back as a new file (named <paramref name="wanted"/>) rather than being silently lost.
     /// </summary>
-    async Task ReplaceInboxFileAsync(ScanSession session, byte[] jpeg, CancellationToken ct)
+    async Task<string> ReplaceInboxFileAsync(string fileName, string wanted, byte[] data, CancellationToken ct)
     {
-        var existing = session.FileName.Length > 0 ? SafeInboxPath(session.FileName) : null;
+        var existing = fileName.Length > 0 ? SafeInboxPath(fileName) : null;
         if (existing is null || !File.Exists(existing))
-        {
-            session.FileName = await WriteNewInboxFileAsync(jpeg, ct);
-            return;
-        }
+            return await WriteNewInboxFileAsync(wanted, data, ct);
 
         var temp = TempPartPath();
         try
         {
-            await File.WriteAllBytesAsync(temp, jpeg, ct);
+            await File.WriteAllBytesAsync(temp, data, ct);
             for (var attempt = 0; ; attempt++)
             {
                 try
                 {
                     File.Move(temp, existing, overwrite: true);
-                    return;
+                    return fileName;
                 }
                 catch (IOException) when (attempt < 4)
                 {

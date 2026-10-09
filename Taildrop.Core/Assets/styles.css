@@ -167,6 +167,13 @@ button:focus:not(:focus-visible) { outline: none; }
   background: var(--surface-2); color: var(--label-2);
 }
 .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.thumb[data-badge] { position: relative; }
+.thumb[data-badge]::after {
+  content: attr(data-badge);
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 0.05rem 0; background: var(--tint); color: var(--tint-contrast);
+  font-size: 0.56rem; font-weight: 700; letter-spacing: 0.04em; line-height: 1.3; text-align: center;
+}
 .thumb svg { width: 1.4rem; height: 1.4rem; }
 
 .meta { min-width: 0; }
@@ -322,7 +329,7 @@ button:focus:not(:focus-visible) { outline: none; }
 
 @media (min-width: 560px) {
   .actions { grid-template-columns: 1fr 1fr; }
-  .actions .text-button { grid-column: 1 / -1; }
+  .actions .text-button, .actions #choose { grid-column: 1 / -1; }
   .action { min-height: 5.2rem; }
 }
 

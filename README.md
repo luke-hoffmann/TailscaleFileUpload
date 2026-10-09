@@ -2,14 +2,16 @@
 
 A tiny Tailscale-only path from your phone to a temporary inbox on your PC, packaged as a single portable `.exe`.
 Send photos and files, or **scan documents straight from the phone camera**: the page is found, flattened and
-arrives on the PC as a clean, full-resolution JPEG. Nothing is saved on the phone.
+arrives on the PC as a clean, full-resolution JPEG, or, for a stapled packet, all pages as **one PDF**. Nothing is
+saved on the phone.
 
 ## Use
 
 1. Copy `Taildrop.exe` to the computer (see [Get the exe](#get-the-exe)) and connect both the computer and phone to Tailscale.
 2. Double-click `Taildrop.exe`. The window shows a QR code; scan it with the phone (or **Copy link**).
-3. On the phone, pick one of two actions:
+3. On the phone, pick an action:
    - **Scan Document**: take a photo of a page or receipt. It lands in the inbox about a second later.
+   - **Scan to PDF**: photograph the pages one after another; they all go into a single PDF.
    - **Send Photos or Files**: pick anything from the photo library or Files, exactly as before.
 4. On the PC, select files in the inbox and drag them into any Explorer folder, or use **Save selected** / **Save all**.
    Double-click opens a file, **F2** renames it, **Delete** removes it.
@@ -36,6 +38,12 @@ window stops the receiver and permanently deletes the inbox.
   If the page can't be found with confidence (for example a sheet buried under pens and other papers), the edge
   editor opens by itself.
 - **Scan Next Page** keeps going; each page is its own JPEG, named `Scan 2026-10-02 at 14.31.05.jpg`.
+- **Scan to PDF** scans the same way, page after page, but everything goes into one `Scan 2026-10-02 at 14.31.05.pdf`
+  that looks like it came off a document scanner: one clean page image per sheet, on the real paper size (Letter,
+  A4 or Legal when the page's proportions match; receipts and cards keep their own shape), at up to 300 dpi.
+  B&W pages are stored as crisp 1-bit images. Every page keeps the same Auto / Gray / B&W / Original, Rotate,
+  Adjust and Retake (a retaken page keeps its place); **Previous** and **Next** flip between pages. The PDF on
+  the PC is rewritten after every change, so it is always complete. Tap the PDF in *Sent to PC* to add more pages.
 - Photos taken from the page's camera button are not added to your photo library.
 
 Tips for the best result: good light, the whole page in the frame, any contrasting surface behind it.

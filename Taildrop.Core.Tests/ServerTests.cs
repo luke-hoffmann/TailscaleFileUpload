@@ -77,6 +77,17 @@ public class ServerTests : IClassFixture<ServerFixture>
 
     string InboxPath(JsonElement scan) => Path.Combine(_f.Inbox, scan.GetProperty("name").GetString()!);
 
+    async Task<JsonElement> NewPdfPage(string pdf, int? index = null)
+    {
+        var request = Scan(HttpMethod.Post, "/api/scan", _f.PagePhoto);
+        request.Headers.Add("X-Scan-Pdf", pdf);
+        if (index is not null) request.Headers.Add("X-Scan-Pdf-Index", index.Value.ToString());
+        var response = await _f.Http.SendAsync(request);
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.Created, text);
+        return Parse(text);
+    }
+
     static byte[] Read(string path)
     {
         // The server may still be finishing a move; give it a moment.
@@ -177,6 +188,100 @@ public class ServerTests : IClassFixture<ServerFixture>
         Assert.False(File.Exists(path));
         Assert.False(Directory.Exists(Path.Combine(_f.Inbox, ".scans", id)));
         Assert.Equal(HttpStatusCode.NotFound, (await _f.Http.GetAsync($"/api/scan/{id}/preview")).StatusCode);
+    }
+
+    [Fact]
+    public async Task PdfLifecycle_AddPages_Edit_Retake_Remove()
+    {
+        // ---- first page starts a PDF; no JPEG appears
+        var jpegsBefore = Directory.GetFiles(_f.Inbox, "*.jpg").Length;
+        var first = await NewPdfPage("new");
+        var pdf = first.GetProperty("pdf");
+        var pdfId = pdf.GetProperty("id").GetString()!;
+        var name = first.GetProperty("name").GetString()!;
+        Assert.Matches(@"^Scan \d{4}-\d{2}-\d{2} at \d{2}\.\d{2}\.\d{2}( \(\d+\))?\.pdf$", name);
+        Assert.Equal(name, pdf.GetProperty("name").GetString());
+        Assert.Equal((1, 1), (pdf.GetProperty("page").GetInt32(), pdf.GetProperty("pages").GetInt32()));
+        Assert.Equal(jpegsBefore, Directory.GetFiles(_f.Inbox, "*.jpg").Length);
+        Assert.True(first.GetProperty("confident").GetBoolean());
+
+        var path = InboxPath(first);
+        var document = new PdfInspector(Read(path));
+        document.AssertWellFormed();
+        Assert.Equal(1, document.PageCount);
+        Assert.Equal((595.28, 841.89), document.MediaBoxes[0]); // the synthetic page is A4
+        Assert.Equal("DeviceRGB", document.Images[0].ColorSpace);
+        Assert.Equal(pdf.GetProperty("size").GetInt64(), new FileInfo(path).Length);
+
+        // ---- more pages: appended, or put in place with an index
+        var second = await NewPdfPage(pdfId);
+        Assert.Equal((2, 2), (second.GetProperty("pdf").GetProperty("page").GetInt32(), second.GetProperty("pdf").GetProperty("pages").GetInt32()));
+        var front = await NewPdfPage(pdfId, index: 0);
+        Assert.Equal((1, 3), (front.GetProperty("pdf").GetProperty("page").GetInt32(), front.GetProperty("pdf").GetProperty("pages").GetInt32()));
+        Assert.Equal(name, front.GetProperty("name").GetString());
+        Assert.Equal(3, new PdfInspector(Read(path)).PageCount);
+        Assert.Single(Directory.GetFiles(_f.Inbox, "*.pdf"), f => Path.GetFileName(f) == name);
+
+        // ---- edit a page: B&W and a quarter turn rewrite that page only
+        var secondId = second.GetProperty("id").GetString()!;
+        var edit = await _f.Http.SendAsync(Json(HttpMethod.Put, $"/api/scan/{secondId}", new { filter = "bw", rotate = 90 }));
+        var edited = Parse(await edit.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.OK, edit.StatusCode);
+        Assert.Equal(3, edited.GetProperty("pdf").GetProperty("page").GetInt32());
+        document = new PdfInspector(Read(path));
+        document.AssertWellFormed();
+        Assert.Equal(new[] { (595.28, 841.89), (595.28, 841.89), (841.89, 595.28) }, document.MediaBoxes);
+        Assert.Equal(new[] { "DeviceRGB", "DeviceRGB", "DeviceGray" }, document.Images.Select(i => i.ColorSpace));
+        Assert.Equal(1, document.Images[2].Bits);
+        var preview = await _f.Http.GetByteArrayAsync(edited.GetProperty("previewUrl").GetString());
+        using (var previewImage = Cv2.ImDecode(preview, ImreadModes.Color))
+            Assert.True(previewImage.Width > previewImage.Height); // the phone sees the turned page
+
+        // ---- retake the middle page: it leaves the PDF, the new photo goes back in its place
+        var firstId = first.GetProperty("id").GetString()!;
+        var retake = await _f.Http.SendAsync(Scan(HttpMethod.Delete, $"/api/scan/{firstId}"));
+        var retaken = Parse(await retake.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.OK, retake.StatusCode);
+        Assert.Equal(2, retaken.GetProperty("pdf").GetProperty("pages").GetInt32());
+        Assert.False(Directory.Exists(Path.Combine(_f.Inbox, ".scans", firstId)));
+        var replacement = await NewPdfPage(pdfId, index: 1);
+        Assert.Equal((2, 3), (replacement.GetProperty("pdf").GetProperty("page").GetInt32(), replacement.GetProperty("pdf").GetProperty("pages").GetInt32()));
+
+        // ---- renamed on the PC: later pages keep going into the renamed file
+        var renamed = "Lease agreement.pdf";
+        File.Move(path, Path.Combine(_f.Inbox, renamed));
+        _f.Server.OnInboxFileRenamed(name, renamed);
+        var fourth = await NewPdfPage(pdfId);
+        Assert.Equal(renamed, fourth.GetProperty("name").GetString());
+        document = new PdfInspector(Read(Path.Combine(_f.Inbox, renamed)));
+        Assert.Equal(4, document.PageCount);
+        Assert.Contains("/Title <FEFF" + Convert.ToHexString(Encoding.BigEndianUnicode.GetBytes("Lease agreement")) + ">", document.Text);
+
+        // ---- every page retaken away: the file goes with the last one
+        foreach (var page in new[] { front, replacement, second, fourth })
+            Assert.Equal(HttpStatusCode.OK, (await _f.Http.SendAsync(Scan(HttpMethod.Delete, $"/api/scan/{page.GetProperty("id").GetString()}"))).StatusCode);
+        Assert.False(File.Exists(Path.Combine(_f.Inbox, renamed)));
+
+        // ---- a PDF removed in the desktop window can't take more pages
+        var again = await NewPdfPage(pdfId);
+        var againName = again.GetProperty("name").GetString()!;
+        Assert.EndsWith(".pdf", againName);
+        _f.Server.OnInboxFileRemoved(againName);
+        File.Delete(InboxPath(again));
+        var request = Scan(HttpMethod.Post, "/api/scan", _f.PagePhoto);
+        request.Headers.Add("X-Scan-Pdf", pdfId);
+        Assert.Equal(HttpStatusCode.NotFound, (await _f.Http.SendAsync(request)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _f.Http.SendAsync(Json(HttpMethod.Put, $"/api/scan/{again.GetProperty("id").GetString()}", new { filter = "gray" }))).StatusCode);
+
+        // ---- bad targets
+        foreach (var (target, position) in new[] { ("../x", (string?)null), (new string('a', 32), null), ("new", "-1"), ("new", "two") })
+        {
+            var bad = Scan(HttpMethod.Post, "/api/scan", _f.PagePhoto);
+            bad.Headers.Add("X-Scan-Pdf", target);
+            if (position is not null) bad.Headers.Add("X-Scan-Pdf-Index", position);
+            Assert.True((await _f.Http.SendAsync(bad)).StatusCode is HttpStatusCode.NotFound or HttpStatusCode.BadRequest);
+        }
+        Assert.DoesNotContain(Directory.GetFiles(_f.Inbox), f => f.EndsWith(".part"));
     }
 
     [Fact]

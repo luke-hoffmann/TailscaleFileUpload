@@ -24,7 +24,17 @@ fs.mkdirSync(SHOTS, { recursive: true });
 
 const sample = name => path.join(SAMPLES, name);
 const inbox = () => fs.readdirSync(INBOX).filter(name => !name.startsWith('.') && fs.statSync(path.join(INBOX, name)).isFile());
-const scans = () => inbox().filter(name => name.startsWith('Scan '));
+const scans = () => inbox().filter(name => name.startsWith('Scan ') && name.endsWith('.jpg'));
+const pdfs = () => inbox().filter(name => name.endsWith('.pdf'));
+/** Page count and page sizes (points) of a PDF in the inbox. */
+const pdfPages = name => {
+  const text = fs.readFileSync(path.join(INBOX, name), 'latin1');
+  return {
+    count: Number(text.match(/\/Type \/Pages \/Kids \[[^\]]*\] \/Count (\d+)/)[1]),
+    sizes: [...text.matchAll(/\/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map(m => `${m[1]}x${m[2]}`),
+    bits: [...text.matchAll(/\/BitsPerComponent (\d)/g)].map(m => Number(m[1]))
+  };
+};
 const sizeOf = name => fs.statSync(path.join(INBOX, name)).size;
 
 // ---------- server ----------
@@ -102,8 +112,9 @@ async function dragHandle(page, label, dx, dy) {
 console.log('\nHome screen');
 let page = await newPage();
 
-await step('two clear actions, camera input opens the rear camera, files input has no restrictions', async () => {
+await step('clear actions, camera input opens the rear camera, files input has no restrictions', async () => {
   assert.equal(await page.locator('#scan strong').innerText(), 'Scan Document');
+  assert.equal(await page.locator('#scanPdf strong').innerText(), 'Scan to PDF');
   assert.equal(await page.locator('#choose strong').innerText(), 'Send Photos or Files');
   assert.equal(await page.locator('#camera').getAttribute('capture'), 'environment');
   assert.equal(await page.locator('#camera').getAttribute('accept'), 'image/*');
@@ -271,6 +282,113 @@ await step('retake removes the old page from the PC and takes its place', async 
   await page.click('#done');
 });
 
+console.log('\nScan to PDF');
+const resultReady = (page, title) => page.waitForFunction(t => document.querySelector('#resultTitle').textContent === t
+  && !document.querySelector('#view-result').hidden && document.querySelector('#resultBusy').hidden
+  && document.querySelector('#resultImage').naturalWidth > 0, title, { timeout: 30000 });
+
+await step('first page starts one PDF on the PC, no JPEG', async () => {
+  const jpegs = scans().length;
+  assert.equal(await page.locator('#scanPdf strong').innerText(), 'Scan to PDF');
+  await page.click('#scanPdf');
+  await page.setInputFiles('#camera', sample('a4-tilted.jpg'));
+  await resultReady(page, 'Page 1 of 1');
+  assert.equal(scans().length, jpegs);
+  assert.equal(pdfs().length, 1);
+  assert.match(pdfs()[0], /^Scan \d{4}-\d{2}-\d{2} at \d{2}\.\d{2}\.\d{2}\.pdf$/);
+  assert.deepEqual(pdfPages(pdfs()[0]), { count: 1, sizes: ['595.28x841.89'], bits: [8] }); // A4, like the paper
+  assert.equal(await page.locator('#resultStatus').innerText(), 'Saved to your PC · 1-page PDF');
+  assert.ok(await page.locator('#pager').isHidden());
+  await shot(page, '18-pdf-page-1');
+});
+
+await step('Scan Next Page adds page 2 to the same PDF; pages can be flipped through', async () => {
+  await page.click('#nextPage');
+  await page.setInputFiles('#camera', sample('receipt-curled.jpg'));
+  await resultReady(page, 'Page 2 of 2');
+  assert.equal(pdfs().length, 1);
+  assert.equal(pdfPages(pdfs()[0]).count, 2);
+  assert.equal(await page.locator('#resultStatus').innerText(), 'Saved to your PC · 2-page PDF');
+  assert.ok(await visible(page, '#pager'));
+  assert.equal(await page.locator('#pagePrev').innerText(), 'Page 1');
+  assert.ok(await page.locator('#pageNext').isDisabled());
+  await shot(page, '19-pdf-page-2');
+  await page.click('#pagePrev');
+  await resultReady(page, 'Page 1 of 2');
+  assert.ok(await page.locator('#pagePrev').isDisabled());
+  assert.equal(await page.locator('#pageNext').innerText(), 'Page 2');
+});
+
+await step('look and rotation change just that page of the PDF', async () => {
+  const [name] = pdfs();
+  await page.click('[data-filter="bw"]');
+  await page.waitForFunction(() => document.querySelector('[data-filter="bw"]').getAttribute('aria-checked') === 'true' && document.querySelector('#resultBusy').hidden);
+  await page.click('#rotate');
+  await page.waitForFunction(() => { const img = document.querySelector('#resultImage'); return img.naturalWidth > img.naturalHeight && document.querySelector('#resultBusy').hidden; });
+  const after = pdfPages(name);
+  assert.equal(after.count, 2);
+  assert.equal(after.sizes[0], '841.89x595.28', 'page 1 turned to landscape A4');
+  assert.deepEqual(after.bits, [1, 8], 'page 1 is 1-bit black & white, page 2 untouched');
+  await page.click('[data-filter="auto"]');
+  await page.waitForFunction(() => document.querySelector('[data-filter="auto"]').getAttribute('aria-checked') === 'true' && document.querySelector('#resultBusy').hidden);
+  for (let i = 0; i < 3; i++) {
+    await page.click('#rotate');
+    await page.waitForFunction(() => document.querySelector('#resultBusy').hidden && !document.querySelector('#rotate').disabled);
+  }
+  await page.waitForFunction(() => { const img = document.querySelector('#resultImage'); return img.naturalWidth < img.naturalHeight; });
+  assert.equal(pdfPages(name).sizes[0], '595.28x841.89');
+});
+
+await step('retaking page 1 replaces it in place', async () => {
+  const [name] = pdfs();
+  const before = fs.readFileSync(path.join(INBOX, name));
+  await page.click('#retake');
+  await page.waitForSelector('#view-wait:not([hidden])');
+  assert.equal(await page.locator('#waitTitle').innerText(), 'Ready for the new page');
+  await page.setInputFiles('#camera', sample('white-desk.jpg'));
+  await resultReady(page, 'Page 1 of 2');
+  assert.deepEqual(pdfs(), [name]);
+  assert.equal(pdfPages(name).count, 2);
+  assert.notDeepEqual(fs.readFileSync(path.join(INBOX, name)), before);
+  // the receipt is still page 2: tall and narrow, fitted to Letter height
+  assert.match(pdfPages(name).sizes[1], /^\d+(\.\d+)?x792$/);
+});
+
+await step('Done: one row for the whole PDF; tapping it lets you add more pages', async () => {
+  await page.click('#done');
+  await page.waitForSelector('#sheet', { state: 'hidden' });
+  const row = page.locator('#queue .row', { has: page.locator('.thumb[data-badge="PDF"]') });
+  assert.equal(await row.count(), 1);
+  assert.equal(await row.locator('.status').innerText(), 'Sent · 2-page PDF · tap to edit');
+  assert.equal(await row.locator('.name').innerText(), pdfs()[0].replace(/\.pdf$/, ''));
+  await page.waitForFunction(() => document.querySelector('#queue .thumb[data-badge="PDF"] img')?.naturalWidth > 0);
+  await shot(page, '20-home-with-pdf');
+
+  await row.click();
+  await page.waitForSelector('#view-result:not([hidden])');
+  assert.match(await page.locator('#resultTitle').innerText(), /^Page [12] of 2$/);
+  await page.click('#nextPage');
+  await page.setInputFiles('#camera', sample('a4-tilted.jpg'));
+  await resultReady(page, 'Page 3 of 3');
+  assert.equal(pdfs().length, 1);
+  assert.equal(pdfPages(pdfs()[0]).count, 3);
+  await page.click('#done');
+  await page.waitForSelector('#sheet', { state: 'hidden' });
+  assert.equal(await row.locator('.status').innerText(), 'Sent · 3-page PDF · tap to edit');
+});
+
+await step('Scan Document afterwards is back to one JPEG per page', async () => {
+  const jpegs = scans().length;
+  await page.click('#scan');
+  await page.setInputFiles('#camera', sample('a4-tilted.jpg'));
+  await page.waitForSelector('#view-result:not([hidden])', { timeout: 30000 });
+  await page.waitForFunction(() => /^Scan \d+$/.test(document.querySelector('#resultTitle').textContent));
+  assert.equal(scans().length, jpegs + 1);
+  assert.equal(pdfPages(pdfs()[0]).count, 3);
+  assert.ok(await page.locator('#pager').isHidden());
+  await page.click('#done');
+});
+
 console.log('\nWhen detection is unsure');
 await step('opens the edge editor straight away, with a clear instruction', async () => {
   await page.setInputFiles('#camera', sample('no-page.jpg'));
@@ -351,6 +469,20 @@ await step('landscape iPhone', async () => {
   assert.ok(preview.height > 250, `page preview is big enough to read in landscape (${Math.round(preview.height)}px tall)`);
   // every control reachable without scrolling the sheet
   for (const selector of ['#nextPage', '#done', '#retake', '#adjust']) {
+    const box = await landscape.locator(selector).boundingBox();
+    assert.ok(box && box.y >= 0 && box.y + box.height <= 390, `${selector} on screen in landscape`);
+  }
+  await landscape.click('#done');
+
+  // A PDF adds a row of page buttons; everything still fits.
+  await landscape.click('#scanPdf');
+  await landscape.setInputFiles('#camera', sample('a4-tilted.jpg'));
+  await resultReady(landscape, 'Page 1 of 1');
+  await landscape.click('#nextPage');
+  await landscape.setInputFiles('#camera', sample('a4-tilted.jpg'));
+  await resultReady(landscape, 'Page 2 of 2');
+  await shot(landscape, '21-pdf-landscape');
+  for (const selector of ['#nextPage', '#done', '#retake', '#adjust', '#pagePrev', '#pageNext']) {
     const box = await landscape.locator(selector).boundingBox();
     assert.ok(box && box.y >= 0 && box.y + box.height <= 390, `${selector} on screen in landscape`);
   }

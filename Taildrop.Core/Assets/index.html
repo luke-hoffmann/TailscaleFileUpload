@@ -34,6 +34,12 @@
           </span>
           <span class="action-text"><strong>Scan Document</strong><small id="scanHint">Whole page, straightened, sent to your PC</small></span>
         </button>
+        <button id="scanPdf" class="action tinted" type="button">
+          <span class="action-icon" aria-hidden="true">
+            <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 7.5V5.5A1.5 1.5 0 0 1 11.5 4h10A1.5 1.5 0 0 1 23 5.5v13a1.5 1.5 0 0 1-1.5 1.5H19"/><rect x="5" y="8" width="14" height="16" rx="1.5"/><path d="M8.5 13h7M8.5 16.5h7M8.5 20h4"/></svg>
+          </span>
+          <span class="action-text"><strong>Scan to PDF</strong><small id="scanPdfHint">Several pages, saved as one PDF</small></span>
+        </button>
         <button id="choose" class="action tinted" type="button">
           <span class="action-icon" aria-hidden="true">
             <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 18V5M9 9.5 14 4.5l5 5"/><path d="M5 15v5a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3v-5"/></svg>
@@ -61,7 +67,7 @@
     <section id="view-wait" class="view" hidden>
       <header class="navbar"><button class="nav-btn" type="button" data-close>Close</button><span class="nav-title">Scan</span><span class="nav-spacer"></span></header>
       <div class="center-stack">
-        <p class="big">Ready for the next photo</p>
+        <p id="waitTitle" class="big">Ready for the next photo</p>
         <button id="takePhoto" class="action primary compact" type="button">Take Photo</button>
       </div>
     </section>
@@ -100,6 +106,16 @@
           <button type="button" role="radio" data-filter="gray" aria-checked="false">Gray</button>
           <button type="button" role="radio" data-filter="bw" aria-checked="false">B&amp;W</button>
           <button type="button" role="radio" data-filter="original" aria-checked="false">Original</button>
+        </div>
+        <div id="pager" class="tool-row" hidden>
+          <button id="pagePrev" class="tool" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
+            <span>Previous</span>
+          </button>
+          <button id="pageNext" class="tool" type="button">
+            <span>Next</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
         </div>
         <div class="tool-row">
           <button id="adjust" class="tool" type="button" aria-label="Adjust edges">

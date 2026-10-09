@@ -178,6 +178,7 @@ function statusText(job) {
       }
       return job.total ? `${percent(job)}% · ${formatBytes(job.loaded)} of ${formatBytes(job.total)}` : `${formatBytes(job.loaded)} sent`;
     case 'sent':
+      if (job.pages) return `Sent · ${job.pages}-page PDF · tap to edit`;
       if (job.kind === 'scan') return 'Sent · tap to adjust';
       return `Sent · ${formatBytes(job.size)}${job.speed ? ` · ${job.speed}` : ''}`;
     case 'failed': return job.message || 'Failed';
@@ -200,13 +201,14 @@ export function render(job) {
   const li = job.li;
   li.dataset.state = job.state;
   const name = li.querySelector('.name');
-  const shown = job.kind === 'scan' ? job.name.replace(/\.jpe?g$/i, '') : job.name; // scans are always JPEGs; the extension is noise here
+  const shown = job.kind === 'scan' ? job.name.replace(/\.(jpe?g|pdf)$/i, '') : job.name; // scans are JPEGs or PDFs (the status says which); the extension is noise here
   name.textContent = shown;
   name.title = job.name;
   li.querySelector('.status').textContent = statusText(job);
 
   // thumbnail
   const thumb = li.querySelector('.thumb');
+  if (job.pages) thumb.dataset.badge = 'PDF'; else delete thumb.dataset.badge;
   const wanted = job.scan ? job.scan.previewUrl : '';
   if (wanted) {
     let img = thumb.querySelector('img');
@@ -248,7 +250,7 @@ export function render(job) {
     li.dataset.openable = '';
     li.tabIndex = 0;
     li.setAttribute('role', 'button');
-    li.setAttribute('aria-label', `${job.name}. Tap to adjust.`);
+    li.setAttribute('aria-label', job.pages ? `${job.name}, ${job.pages} pages. Tap to edit or add pages.` : `${job.name}. Tap to adjust.`);
     li.onclick = () => openScan?.(job);
     li.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openScan?.(job); } };
   } else {
@@ -358,17 +360,26 @@ function retry(job) {
  * Sends a photo to be scanned. Returns { job, promise }; the promise resolves with the scan the PC made
  * ({ id, name, outline, previewUrl, ... }) or rejects with a RequestError. While in flight the job shows in
  * the list; on failure the job is removed again (the scanner screen owns the error and the retry).
+ * With `pdf` ({ id, index, job }) the photo becomes a page of a multi-page PDF (id null starts a new one); all
+ * of a PDF's pages share one row, `pdf.job`, once it exists.
  */
-export function startScan(file, filter = 'auto', { onProgress, onPhase } = {}) {
-  const job = makeJob({ kind: 'scan', blob: file, name: 'Scanning…', size: file.size, total: file.size, phase: 'upload' });
-  addJobs([job]);
+export function startScan(file, filter = 'auto', { pdf = null, onProgress, onPhase } = {}) {
+  const existing = pdf?.job ?? null;
+  const job = existing ?? makeJob({ kind: 'scan', blob: file, name: 'Scanning…', size: file.size, total: file.size, phase: 'upload' });
+  if (existing) Object.assign(job, { blob: file, loaded: 0, total: file.size, phase: 'upload' });
+  else addJobs([job]);
   job.state = 'sending';
   render(job);
   refresh();
 
+  const headers = { 'X-Taildrop': '1', 'X-Scan-Filter': filter, 'Content-Type': file.type || 'image/jpeg' };
+  if (pdf) {
+    headers['X-Scan-Pdf'] = pdf.id || 'new';
+    if (Number.isInteger(pdf.index)) headers['X-Scan-Pdf-Index'] = String(pdf.index);
+  }
   const upload = request('POST', '/api/scan', {
     body: file,
-    headers: { 'X-Taildrop': '1', 'X-Scan-Filter': filter, 'Content-Type': file.type || 'image/jpeg' },
+    headers,
     onUpload: event => {
       job.loaded = event.loaded;
       if (event.lengthComputable) job.total = event.total;
@@ -390,7 +401,15 @@ export function startScan(file, filter = 'auto', { onProgress, onPhase } = {}) {
       return data;
     })
     .catch(error => {
-      removeJob(job);
+      if (existing) {
+        // The PDF's earlier pages are still on the PC; its row stays.
+        job.state = 'sent';
+        job.phase = '';
+        render(job);
+        refresh();
+      } else {
+        removeJob(job);
+      }
       if (error.kind === 'network' || error.kind === 'timeout') checkConnection();
       throw error;
     });
