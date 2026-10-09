@@ -76,6 +76,9 @@ sealed partial class MainForm : Form
     {
         SuspendLayout();
         Text = "Taildrop";
+        // Title bar and taskbar: WinForms windows don't pick up the exe's icon by themselves.
+        using (var icon = typeof(MainForm).Assembly.GetManifestResourceStream("TaildropApp.app.ico"))
+            if (icon is not null) Icon = new Icon(icon);
         BackColor = Palette.Background;
         ForeColor = Palette.Ink;
         Font = UiFonts.Body;

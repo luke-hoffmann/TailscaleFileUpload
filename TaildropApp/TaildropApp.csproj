@@ -8,7 +8,8 @@
     <Nullable>enable</Nullable>
     <AssemblyName>Taildrop</AssemblyName>
     <RootNamespace>TaildropApp</RootNamespace>
-    <ApplicationIcon />
+    <!-- Explorer / desktop icon. Made by tools/e2e/make-app-icon.mjs; also embedded below for the window and taskbar. -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <InvariantGlobalization>true</InvariantGlobalization>
 
     <!-- Single portable exe: self-contained .NET runtime, no separate install on the target machine -->
@@ -30,6 +31,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Taildrop.Core\Taildrop.Core.csproj" />
+    <EmbeddedResource Include="app.ico" LogicalName="TaildropApp.app.ico" />
     <!-- Native OpenCV for the document scanner (Windows x64). -->
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
   </ItemGroup>
